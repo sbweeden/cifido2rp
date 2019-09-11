@@ -1,0 +1,34 @@
+{
+  "//1": "describes your app and its dependencies",
+  "//2": "https://docs.npmjs.com/files/package.json",
+  "//3": "updating this file will download and update your packages",
+  "name": "cifido2rp",
+  "version": "0.0.1",
+  "description": "WebAuthn RP that uses IBM Cloud Identity FIDO2 server",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "start_local": "node -r dotenv/config server.js"
+  },
+  "dependencies": {
+    "cbor": "^4.3.0",
+    "cookie-parser": "^1.4.4",
+    "express": "^4.17.1",
+    "express-session": "^1.16.2",
+    "fs": "0.0.1-security",
+    "https": "^1.0.0",
+    "jsrsasign": "^8.0.12",
+    "npm": "^6.10.1",
+    "passport": "^0.4.0",
+    "passport-openidconnect": "0.0.2",
+    "request-promise-native": "^1.0.7",
+    "uuid": "^3.3.2"
+  },
+  "engines": {
+    "node": "8.x"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "dotenv": "^8.0.0"
+  }
+}

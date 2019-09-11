@@ -1,0 +1,862 @@
+<html>
+<head>
+	<script src = "https://code.jquery.com/jquery-1.11.3.min.js"></script>
+	<script src = "https://kjur.github.io/jsrsasign/jsrsasign-latest-all-min.js"></script>
+	<script type="text/javascript">
+
+    	var locationHostPort = location.hostname+(location.port ? ':'+location.port: ''); 
+		var baseURL = location.protocol+'//'+locationHostPort;
+
+		var userData = {};
+
+		var attestationResponseObject = null;
+		var assertionResponseObject = null;
+
+		function htmlEncode(value){
+		    if (value) {
+		    	return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+		    } else {
+		        return '';
+		    }
+		}
+
+		function showDiv(id) {
+			document.getElementById(id).style.display = "block";
+		}
+
+		function hideDiv(id) {
+			document.getElementById(id).style.display = "none";
+		}
+
+		function updateMsgRaw(msg) {
+			document.getElementById("detailsMsgDiv").innerHTML = msg;
+			showDiv("detailsDiv");
+		}
+
+		function updateMsg(msg) {
+			updateMsgRaw(htmlEncode(msg));
+		}
+
+
+		function clearMsg() {
+			hideDiv("detailsDiv");
+			document.getElementById("detailsMsgDiv").innerHTML = "";
+		}
+
+		/*
+		* If the object is only an array of numbers, replace as a tagged string, otherwise beautify
+		* in the normal manner. This is used by myJSONStringify to beautify everything but int arrays 
+		* which can be quite long and take up too much vertical space when printed.
+		*/
+		function myJSONReplacer(name,val) {
+			if (typeof val == "object" && Array.isArray(val)) {
+				var allIntArray = true;
+				for (var i = 0; i < val.length && allIntArray; i++) {
+					if (typeof val[i] != "number") {
+						allIntArray = false;
+					}
+				}
+				if (allIntArray) {
+					return "BEGIN_ARRAY" + JSON.stringify(val) + "END_ARRAY";
+				}
+			}
+			return val;
+		}
+
+		/*
+		* Pretty-prints a JSON object, except for integer arrays which are preserved as a single long line
+		*/
+		function myJSONStringify(o) {
+			return JSON.stringify(o, myJSONReplacer, 2).replace(/\"BEGIN_ARRAY\[/g, "[").replace(/\]END_ARRAY\"/g, "]");
+		}
+
+		function doLogin() {
+			clearMsg();
+			var username = document.getElementById("username").value;
+			var password = document.getElementById("password").value;
+			if (username != null && username.length > 0 && password != null && password.length > 0) {
+				$.ajax({
+					type: "POST",
+					url: baseURL + '/login',
+					data: JSON.stringify({"username": username, "password": password}),
+					beforeSend: (request) => {
+    					request.setRequestHeader("Content-type", "application/json");
+    					request.setRequestHeader("Accept", "application/json");
+  					}
+				}).done((data, textStatus, jqXHR) => {
+					var rspStatus = jqXHR.status;
+					if (rspStatus == 200) {
+						userData = data;
+						if (userData.authenticated) {
+							hideDiv("loginDiv");
+							populateFido2Div();
+							showDiv("fido2Div");
+						} else {
+							updateMsg(data.errorMessage ? data.errorMessage : "Unable to login");
+						}
+					} else {
+						updateMsg("Unexpected HTTP response code: " + rspStatus);
+					}
+				});
+			} else {
+				updateMsg("Please enter a username and password");
+			}
+		}
+
+		function doLoginOIDC() {
+			window.location = baseURL + "/loginoidc";
+		}
+
+		function doLogout() {
+			clearMsg();
+			$.ajax({
+				type: "GET",
+				url: baseURL + '/logout',
+				beforeSend: (request) => {
+					request.setRequestHeader("Accept", "application/json");
+					}
+			}).done((data, textStatus, jqXHR) => {
+				var rspStatus = jqXHR.status;
+				if (rspStatus == 200) {
+					onLoad();
+				} else {
+					updateMsg("Unexpected HTTP response code: " + rspStatus);
+				}
+			});
+		}
+
+		function defaultRegistrationSort(a,b) {
+			// sort first by nickname, credentialId
+			if (a.attributes.nickname < b.attributes.nickname) {
+				return -1;
+			}	else if (a.attributes.nickname > b.attributes.nickname) {
+				return 1;
+			} else {
+				if (a.id < b.id) {
+					return -1;
+				} else if (a.id > b.id) {
+					return 1;
+				}
+			}
+			return 0;
+		}
+
+		function sortByMostRecent(aTime,bTime,a,b) {
+			// unknowns are always last, otherwise most-recent is smallest
+			if (aTime == "unknown" && bTime == "unknown") {
+				return defaultRegistrationSort(a,b);
+			} else if (aTime == "unknown") {
+				return 1;
+			} else if (bTime == "unknown") {
+				return -1;
+			} else if (bTime < aTime) {
+				return -1;
+			} else if (bTime > aTime) {
+				return 1;
+			} else {
+				// must be same time - fallback to default sort
+				return defaultRegistrationSort(a,b);
+			}
+		}
+
+		function populateFido2Div() {
+			document.getElementById("usernameDiv").innerHTML = 
+				'Hi <b>' + htmlEncode(userData.username) + '</b>.&nbsp;&nbsp;<a href="javascript:doLogout()">Logout</a>' ;
+
+			// hide the table in case this is a re-sort
+			hideDiv("erDiv");
+
+			// sort according to desired sort criteria
+			var sortCriteria = document.getElementById("sortSelect").value;
+			if (sortCriteria == "lastused") {
+				userData.credentials.sort(function(a,b) {
+					return sortByMostRecent(a.attempted || "unknown", b.attempted || "unknown", a, b);
+				});				
+			} else if (sortCriteria == "created") {
+				userData.credentials.sort(function(a,b) {
+					return sortByMostRecent(a.created || "unknown", b.created || "unknown", a, b);
+				});				
+			} else {
+				// just use default sort
+				userData.credentials.sort(function(a,b) {
+					return defaultRegistrationSort(a,b);
+				});
+			}			
+
+			var table = document.getElementById("fido2registrationsTable");
+			// delete any existing data and table rows
+			for(var i = table.rows.length-1; i > 0; i--) {
+				table.deleteRow(i);
+			}
+			// populate retrieved credentials
+			console.log("userData: " + JSON.stringify(userData));
+			for (var i = 0; i < userData.credentials.length; i++) {
+				var reg = userData.credentials[i];
+
+				var tr = table.insertRow(-1);
+				var friendlyNameTD = tr.insertCell(-1);
+				var brandTD = tr.insertCell(-1);
+				var rpidTD = tr.insertCell(-1);
+				var enabledTD = tr.insertCell(-1);
+				var validatedTD = tr.insertCell(-1);
+				var createdTD = tr.insertCell(-1);
+				var lastUsedTD = tr.insertCell(-1);
+				var operationsTD = tr.insertCell(-1);
+
+				if (reg.attributes["nickname"] != null) {
+					friendlyNameTD.innerHTML = htmlEncode(reg.attributes.nickname);
+				}
+
+				brandTD.align = "center";
+				brandTD.innerHTML = "";
+
+				//
+				// Brand info isn't guaranteed to be included in all search responses
+				// for performance reasons, but we're writing this RP to work whether
+				// they are included in the initial search results or not.
+				//
+				if (reg.attributes["description"] != null) {
+					brandTD.innerHTML += htmlEncode(reg.attributes["description"]);
+					if (reg.attributes["icon"] != null) {
+						brandTD.innerHTML += '<br>';
+					}
+				}
+				if (reg.attributes["icon"] != null) {
+					brandTD.innerHTML += '<img src="' + reg.attributes.icon + '" style= \"max-height: 50px; max-width: 100px;\"" />'; 
+				}
+
+				//
+				// If the brand attributes were not in the given registration payload
+				// returned from a search, retrieve the entire registration as they
+				// will be there.
+				//
+				if (brandTD.innerHTML == "") {
+					retrieveRegDetails(reg.id, brandTD);
+				}
+
+				rpidTD.innerHTML = htmlEncode(reg.rpId);
+
+				enabledTD.innerHTML = htmlEncode(''+reg.enabled);
+				validatedTD.innerHTML = htmlEncode(''+reg.validated);
+
+				createdTD.innerHTML = htmlEncode(reg.created || '');
+				lastUsedTD.innerHTML = htmlEncode(reg.attempted || '');
+
+				operationsTD.innerHTML = "";
+				// if the rpid matches the current host, allow test
+				operationsTD.innerHTML += '<input type="button" value="Details" onclick="details('+i+')" />';
+				operationsTD.innerHTML += '<br />';
+				if (location.hostname.indexOf(reg.rpId) >= 0) {
+					operationsTD.innerHTML += '<input type="button" value="Test" onclick="testAuthentication('+i+')" />';
+					operationsTD.innerHTML += '<br />';
+				}
+				operationsTD.innerHTML += '<input type="button" value="Delete" onclick="deleteRegistration('+i+')" />';
+			}
+
+			if (userData.status && userData.status == "failed") {
+				updateMsg(userData.errorMessage || "Unable to get FIDO2 registrations");
+			}
+			showDiv("erDiv");
+		}
+
+		function details(i) {
+			var reg = userData.credentials[i];
+
+			var jsonAttributes = [ "attributes", "references" ]; 
+			
+			// dump details of this registration into the msgdiv
+			var details = "Registration Details<br />";
+			details += "<table border=\"1\">";
+			details += "<tr><th>Attribute</th><th>Value</th></tr>";
+			var keys = Object.keys(reg);
+			if (keys != null && keys.length > 0) {
+				for (var i = 0; i < keys.length; i++) {
+					var keyname = keys[i];
+					var val = reg[keys[i]];
+					
+					// some special formatting for certain well-known attributes
+					if (jsonAttributes.indexOf(keyname) >=0) {
+						// these are JSON objects
+						if (val != null) {
+							//val = htmlEncode(JSON.stringify(val));
+							val = htmlEncode(myJSONStringify(val)).replace(/ /g,'&nbsp;').replace(/\n/g,'<br>');
+						}
+					} else if (keyname == "aaguid") {
+						if (val != null) {
+							if (val.toUpperCase() === "6028B017-B1D4-4C02-B4B3-AFCDAFC96BB2") {
+								val = val + " (Windows Hello software authenticator)";
+							} else if (val.toUpperCase() === "08987058-CADC-4B81-B6E1-30DE50DCBE96") {
+								val = val + " (Windows Hello hardware authenticator)";
+							} else if (val.toUpperCase() === "6E96969E-A5CF-4AAD-9B56-305FE6C82795") {
+								val = val + " (Windows Hello VBS software authenticator)";
+							} else if (val.toUpperCase() === "9DDD1817-AF5A-4672-A2B9-3E3DD95000A9") {
+								val = val + " (Windows Hello VBS hardware authenticator)";
+							} else if (val.toUpperCase() === "ADCE0002-35BC-C60A-648B-0B25F1F05503") {
+								val = val + " (Mac touchbar)";
+							}
+							
+							
+						}
+					}
+
+					// don't re-encode json attributes since we already did that above when formatting
+					details += "<tr><td>" + htmlEncode(keyname) + "</td><td>" + 
+						(jsonAttributes.indexOf(keyname) >= 0 ? val : htmlEncode(''+val)) + "</td></tr>";
+				}
+			}
+			details += "</table>";
+			updateMsgRaw(details);
+		}
+
+		function deleteRegistration(i) {
+			clearMsg();
+			$.ajax({
+				type: "POST",
+				url: baseURL + '/deleteRegistration',
+				data: JSON.stringify({"id": userData.credentials[i].id}),
+				beforeSend: (request) => {
+					request.setRequestHeader("Content-type", "application/json");
+					request.setRequestHeader("Accept", "application/json");
+					}
+			}).done((data, textStatus, jqXHR) => {
+				var rspStatus = jqXHR.status;
+				if (rspStatus == 200 && !(data.status && data.status == "failed")) {
+					userData = data;
+					populateFido2Div();
+				} else {
+					if (rspStatus == 200) {
+						updateMsg(data.errorMessage || "UNKNOWN ERROR");
+					} else {
+						updateMsg("Unexpected HTTP response code: " + rspStatus);
+					}
+				}
+			});
+		}
+
+		function toggleAdvancedOptions() {
+			document.getElementById("advancedOptions").checked ? showDiv("aodiv") : hideDiv("aodiv");
+		}
+
+		function onLoad() {
+			// hide everything
+			hideDiv("loginDiv");
+			hideDiv("fido2Div");
+			hideDiv("detailsDiv");
+
+			// figure out if we are logged in and render
+			$.ajax({
+				type: "GET",
+				url: baseURL + '/me',
+			}).done((data, textStatus, jqXHR) => {
+				var rspStatus = jqXHR.status;
+				if (rspStatus == 200) {
+					userData = data;
+					if (userData.authenticated) {
+						populateFido2Div();
+						showDiv("fido2Div");
+					} else {
+						// setup enter handler
+						$('#password').keypress(function(event) {
+							var keycode = (event.keyCode ? event.keyCode : event.which);
+							if(keycode == '13') {
+								doLogin();	
+							}
+						});
+						showDiv("loginDiv");
+					}
+				} else {
+					updateMsg("Unexpected HTTP response code: " + rspStatus);
+				}
+			});
+		}
+
+		function retrieveRegDetails(regId, brandTD) {
+			$.ajax({
+				type: "GET",
+				url: baseURL + '/registrationDetails',
+				data: {
+					"id": regId
+				},
+				beforeSend: (request) => {
+					request.setRequestHeader("Accept", "application/json");
+				}				
+			}).done((data, textStatus, jqXHR) => {
+				var rspStatus = jqXHR.status;
+				if (rspStatus == 200) {
+					var reg = data;
+					if (reg != null && reg.attributes != null) {
+						brandTD.innerHTML = "";
+						if (reg.attributes["description"] != null) {
+							brandTD.innerHTML += htmlEncode(reg.attributes["description"]);
+							if (reg.attributes["icon"] != null) {
+								brandTD.innerHTML += '<br>';
+							}
+						}
+						if (reg.attributes["icon"] != null) {
+							brandTD.innerHTML += '<img src="' + reg.attributes.icon + '" style= \"max-height: 50px; max-width: 100px;\"" />'; 
+						}						
+					}
+				} else {
+					console.log("error retrieving registration details for regId: " + regId);
+				}
+			});			
+		}
+
+		function refreshRegistrations() {
+			// similar to onLoad, but only updates the fido2Div contents unless error
+			clearMsg();
+
+			$.ajax({
+				type: "GET",
+				url: baseURL + '/me',
+			}).done((data, textStatus, jqXHR) => {
+				var rspStatus = jqXHR.status;
+				if (rspStatus == 200) {
+					userData = data;
+					if (userData.authenticated) {
+						populateFido2Div();
+					} else {
+						// probably session timeout, just start again...
+						onLoad();
+					}
+				} else {
+					updateMsg("Unexpected HTTP response code: " + rspStatus);
+				}
+			});
+		}
+
+		function register() {
+			clearMsg();
+			
+			// prepare an options call based on the selected registration criteria
+			var options = {};
+			if (userData.authenticated) {
+				options["username"] = userData.username;
+				options["displayName"] = userData.username;
+			}
+			
+			options["authenticatorSelection"] = {
+					"requireResidentKey": ($('#requireResidentKey:checkbox:checked').length > 0),
+					"userVerification": $('#userVerification').val()
+			};
+
+			// optional
+			var authenticatorAttachment = $('#authenticatorAttachment').val()
+			if (authenticatorAttachment == 'platform' || authenticatorAttachment == 'cross-platform') {
+				options["authenticatorSelection"]["authenticatorAttachment"] = authenticatorAttachment;
+			}
+			
+			options["attestation"] = $('#attestationConveyancePreference').val();
+
+			// workaround for https://github.com/w3c/webauthn/issues/1287
+			// if rk is requested, also request credProtect extension
+			if (options.authenticatorSelection.requireResidentKey) {
+				options["extensions"] = { "credProtect": 2 };
+			}
+					
+			sendAttestationOptionsRequest(options);	
+		}
+
+		function sendAttestationOptionsRequest(options) {
+			$.ajax({ 
+				type:"POST",
+				url: baseURL + '/attestation/options',
+				data: JSON.stringify(options),
+				beforeSend: (request) => {
+					request.setRequestHeader("Content-Type", "application/json");
+					request.setRequestHeader("Accept", "application/json");
+						}
+				}).done((data, textStatus, jqXHR) => {
+					processAttestationOptionsResponse(data, textStatus, jqXHR);
+				}).fail((jqXHR, textStatus, errorThrown) => {
+					processAttestationOptionsResponse(jqXHR["responseJSON"], textStatus, jqXHR);
+				});
+		}
+
+		function processAttestationOptionsResponse(serverOptions, textStatus, jqXHR) {
+			var rspStatus = jqXHR.status;
+			//console.log("rspStatus: " + rspStatus);
+			if (rspStatus == 200 && serverOptions["status"] && serverOptions.status == "ok") {
+				// all ok - let's invoke the WebAuthn API to register
+				
+				// remove the status and errorMessage keys
+				delete serverOptions["status"];
+				delete serverOptions["errorMessage"];
+
+				// potential modifications to the serverOptions based on advanced browser-provided options
+				var useExcludeCredentials = ($('#excludeCredentials:checkbox:checked').length > 0);
+				if (!useExcludeCredentials) {
+					serverOptions["excludeCredentials"] = [];
+				}
+				
+				// massage some of the b64u fields into the required ArrayBuffer types
+				var b64uUID = serverOptions.user.id;
+				serverOptions.user.id = new Uint8Array(b64toBA(b64utob64(b64uUID)));
+
+				var b64uChallenge = serverOptions.challenge;
+				serverOptions.challenge = new Uint8Array(b64toBA(b64utob64(b64uChallenge)));
+
+				if (serverOptions["excludeCredentials"] != null && serverOptions["excludeCredentials"].length > 0) {
+					for (var i = 0; i < serverOptions["excludeCredentials"].length; i++) {
+						var b64uCID = serverOptions.excludeCredentials[i].id;
+						serverOptions.excludeCredentials[i].id= new Uint8Array(b64toBA(b64utob64(b64uCID)));
+					}
+				}
+
+				var credCreateOptions = { "publicKey": serverOptions };
+				
+				// call the webauthn API
+				navigator.credentials.create(credCreateOptions).then(
+					(result) => {
+						// success
+						createResponse = result;
+							console.log("Received response from authenticator.");
+												
+							// marshall the important parts of the response into an object which we'll later send to the server for validation
+							var clientDataJSONB64u = hextob64u(BAtohex(new Uint8Array(createResponse.response.clientDataJSON)));
+							var attestationObjectCBORB64u = hextob64u(BAtohex(new Uint8Array(createResponse.response.attestationObject)));
+							var clientExtensionResults = createResponse.getClientExtensionResults();
+							
+							attestationResponseObject = {};
+							attestationResponseObject["id"] = createResponse.id;
+							attestationResponseObject["rawId"] = createResponse.id;
+							attestationResponseObject["type"] = "public-key";
+							attestationResponseObject["response"] = {
+									"clientDataJSON": clientDataJSONB64u,
+									"attestationObject": attestationObjectCBORB64u
+							};
+							
+							// if there are extensions results, include those
+							if (clientExtensionResults != null) {
+								attestationResponseObject["getClientExtensionResults"] = clientExtensionResults;
+							}
+							
+							// prompt for the nickname
+							promptForNickname();
+
+					}, (err) => {
+						// error
+							console.log(err);
+							updateMsg("FIDO2 registration failed: " + err);
+					});
+			} else {
+				console.log("Unable to obtain attestation options. rspStatus: " + rspStatus + " response: " + serverOptions);
+				updateMsg(serverOptions.errorMessage || "Unable to obtain attestation options");
+			}
+		}
+
+		function promptForNickname() {
+			$('#nickname').val('');
+			showDiv("nicknamediv");
+			$('#nickname').keypress((event) => {
+				var keycode = (event.keyCode ? event.keyCode : event.which);
+				if(keycode == '13') {
+					processNickname();	
+				}
+			});
+			$('#nickname').focus();
+		}
+
+		function processNickname() {
+			hideDiv("nicknamediv");
+			
+			if (attestationResponseObject != null) {
+			 	attestationResponseObject["nickname"] = $('#nickname').val();
+			
+				// send attestation response object to server
+				console.log("Sending to server: " + JSON.stringify(attestationResponseObject));
+				sendAttestationResult(attestationResponseObject);
+			}			
+		}
+
+		function sendAttestationResult(response) {
+			$.ajax({ 
+				type:"POST",
+				url: baseURL + '/attestation/result',
+				data: JSON.stringify(response),
+				beforeSend: (request) => {
+					request.setRequestHeader("Content-Type", "application/json");
+					request.setRequestHeader("Accept", "application/json");
+						}
+				}).done((data, textStatus, jqXHR) => {
+					processAttestationResultResponse(data, textStatus, jqXHR);
+				}).fail((jqXHR, textStatus, errorThrown) => {
+					processAttestationResultResponse(
+							(jqXHR["responseJSON"] != null ? jqXHR["responseJSON"] : 
+								(jqXHR["responseText"] != null ? JSON.parse(jqXHR.responseText) : null)) , textStatus, jqXHR);
+				});
+		}
+
+		function processAttestationResultResponse(data, textStatus, jqXHR) {
+			var rspStatus = jqXHR.status;
+			//console.log("rspStatus: " + rspStatus);
+			if (rspStatus == 200 && data["status"] == "ok") {
+				console.log("processAttestationResultResponse received: " + JSON.stringify(data));
+				// clear previously sent object
+				attestationResponseObject = null;
+
+				// refresh registration table
+				refreshRegistrations();
+			} else {
+				// clear previously sent object
+				attestationResponseObject = null;
+
+
+				console.log("Unexpected HTTP response");
+				var detailsMsg = null;
+				if (data != null && data["status"] != null && data["errorMessage"] != null) {
+					detailsMsg = " ErrorStatus: " + data.status + " ErrorMsg: " + data.errorMessage;
+				}
+				updateMsg("Unexpected HTTP response code: " + rspStatus + (detailsMsg == null ? "" : detailsMsg));
+			}
+		}
+
+		function testAuthentication(i) {			
+			//alert('Testing login with reg: ' + userData.credentials[i].nickname);
+			clearMsg();
+
+			// prepare an options call based on the selected registration
+			var options = {};
+			if (userData.authenticated) {
+				options["username"] = userData.username;
+			}
+			
+			sendAssertionOptionsRequest(options, i, false);	
+		}
+
+		function sendAssertionOptionsRequest(options, i, performLogin) {
+			$.ajax({ 
+				type:"POST",
+				url: baseURL + '/assertion/options',
+				data: JSON.stringify(options),
+				beforeSend: (request) => {
+					request.setRequestHeader("Content-Type", "application/json");
+					request.setRequestHeader("Accept", "application/json");
+						}
+				}).done((data, textStatus, jqXHR) => {
+					processAssertionOptionsResponse(data, textStatus, jqXHR, i, performLogin);
+				}).fail((jqXHR, textStatus, errorThrown) => {
+					processAssertionOptionsResponse(jqXHR["responseJSON"], textStatus, jqXHR, i, performLogin);
+				});
+		}
+
+		function processAssertionOptionsResponse(serverOptions, textStatus, jqXHR, i, performLogin) {
+			var rspStatus = jqXHR.status;
+			//console.log("rspStatus: " + rspStatus);
+			if (rspStatus == 200 && serverOptions["status"] && serverOptions.status == "ok") {
+				// all ok - let's invoke the WebAuthn API to authenticate
+				console.log("Received assertion options: " + JSON.stringify(serverOptions));
+				
+				// remove the status and errorMessage keys
+				delete serverOptions["status"];
+				delete serverOptions["errorMessage"];
+				
+				// potential modifications to the serverOptions based on the selected registration
+				
+				// we filter the allowCredentials list to include only the authenticator being tested. 
+				// If i < 0, then we use whatever the server sent
+				if (i >= 0 && serverOptions["allowCredentials"] != null) {
+					var newAllowCredentials = [];
+					for (var j = 0; j < serverOptions.allowCredentials.length && newAllowCredentials.length == 0; j++) {
+						if (serverOptions.allowCredentials[j].id == userData.credentials[i].attributes.credentialId) {
+							newAllowCredentials.push(serverOptions.allowCredentials[j]);
+						}
+					}
+					serverOptions.allowCredentials = newAllowCredentials;
+				}
+				
+				// massage some of the b64u fields into the required ArrayBuffer types
+				var b64uChallenge = serverOptions.challenge;
+				serverOptions.challenge = new Uint8Array(b64toBA(b64utob64(b64uChallenge)));
+
+				if (serverOptions["allowCredentials"] != null && serverOptions["allowCredentials"].length > 0) {
+					for (var i = 0; i < serverOptions["allowCredentials"].length; i++) {
+						var b64uCID = serverOptions.allowCredentials[i].id;
+						serverOptions.allowCredentials[i].id= new Uint8Array(b64toBA(b64utob64(b64uCID)));
+					}
+				}
+
+				var credRequestOptions = { "publicKey": serverOptions };
+				console.log("calling navigator.credentials.get with: " + JSON.stringify(credRequestOptions));
+				
+				// call the webauthn API
+				navigator.credentials.get(credRequestOptions).then(
+					(authenticateResponse) => {
+						// success
+						console.log("Received from authenticator: " + JSON.stringify(authenticateResponse));
+						
+						// marshall the important parts of the response into an object which we send to the server for validation
+						var clientDataJSONB64u = hextob64u(BAtohex(new Uint8Array(authenticateResponse.response.clientDataJSON)));
+						var authenticatorDataCBORB64u = hextob64u(BAtohex(new Uint8Array(authenticateResponse.response.authenticatorData)));
+						var signatureB64u = hextob64u(BAtohex(new Uint8Array(authenticateResponse.response.signature)));
+						var userHandleB64U = hextob64u(BAtohex(new Uint8Array(authenticateResponse.response.userHandle)));
+						var clientExtensionResults = authenticateResponse.getClientExtensionResults();
+						
+						assertionResponseObject = {};
+						assertionResponseObject["id"] = authenticateResponse.id;
+						assertionResponseObject["rawId"] = authenticateResponse.id;
+						assertionResponseObject["type"] = "public-key";
+						assertionResponseObject["response"] = {
+								"clientDataJSON": clientDataJSONB64u,
+								"authenticatorData": authenticatorDataCBORB64u,
+								"signature": signatureB64u,
+								"userHandle": userHandleB64U,
+						};
+						
+						// if there are extensions results, include those
+						if (clientExtensionResults != null) {
+							assertionResponseObject["getClientExtensionResults"] = clientExtensionResults;
+						}
+						
+						// send to server for result processing
+						console.log("Sending to server: " + JSON.stringify(assertionResponseObject));
+						sendAssertionResult(assertionResponseObject, performLogin, 2);
+					}, (err) => {
+						// error
+							console.log(err);
+							updateMsg("FIDO2 authentication failed: " + err);
+					});
+			} else {
+				console.log("Unable to obtain assertion options. rspStatus: " + rspStatus + " response: " + serverOptions);
+				updateMsg(serverOptions.errorMessage || "Unable to obtain assertion options");
+			}
+		}
+
+		function sendAssertionResult(response, performLogin) {
+			$.ajax({ 
+				type:"POST",
+				url: baseURL + (performLogin ? '/assertion/login' : '/assertion/result'),
+				data: JSON.stringify(response),
+				beforeSend: (request) => {
+					request.setRequestHeader("Content-Type", "application/json");
+					request.setRequestHeader("Accept", "application/json");
+						}
+				}).done((data, textStatus, jqXHR) => {
+					processAssertionResultResponse(data, textStatus, jqXHR, performLogin);
+				}).fail((jqXHR, textStatus, errorThrown) => {
+					processAssertionResultResponse(jqXHR["responseJSON"], textStatus, jqXHR, performLogin);
+				});
+		}
+
+		function processAssertionResultResponse(data, textStatus, jqXHR, performLogin) {
+			var rspStatus = jqXHR.status;
+			if (rspStatus == 200) {
+				console.log("processAssertionResultResponse received: " + JSON.stringify(data));
+				if (performLogin) {
+					// we should have received user information in response
+					userData = data;
+					if (userData.authenticated) {
+						hideDiv("loginDiv");
+						populateFido2Div();
+						showDiv("fido2Div");
+					} else {
+						updateMsg(data.errorMessage ? data.errorMessage : "Unable to login");
+					}
+				} else {
+					// this was just a test authentication
+					if (data.status == "ok") {						
+						alert("Authentication successful");
+					} else {
+						alert("Authentication failed: " + data.errorMessage);
+					}
+				}
+			} else {
+				console.log("Unexpected HTTP response code: " + rspStatus);
+				updateMsg("Unexpected HTTP response code: " + rspStatus);
+			}
+		}
+
+		function doUsernamelessLogin() {
+			// clear any previous error
+			clearMsg();
+
+			// get assertion options with empty username, and indicate this is a login operation
+			sendAssertionOptionsRequest({"username":""}, -1, true);	
+		}
+
+	</script>
+</head>
+<body onload="onLoad()">
+	<h2>FIDO2 Demo Relying Party</h2>
+	<div id="loginDiv" style="display:none">
+		<table border="0">
+			<tr><td>Username:</td><td><input id="username" type="text" size="20" value="emily" /></td></tr>
+			<tr><td>Password:</td><td><input id="password" type="password" size="20" /></td></tr>
+			<tr><td colspan="2"><input type="button" value="Username/Password Login" onclick="doLogin()" /></td></tr>
+			<tr />
+			<tr><td colspan="2"><input type="button" value="OIDC Login" onclick="doLoginOIDC()" /></td></tr>
+			<tr />
+		</table>
+		<br />
+		<input type="button" value="FIDO2 Usernameless Login" onclick="doUsernamelessLogin()" />
+	</div>
+	<div id="fido2Div" style="display:none">
+		<div id="usernameDiv"></div>
+		<br>
+		<div id="erDiv">
+		    Sort by:&nbsp;<select id="sortSelect" onchange="populateFido2Div()">
+		    	<option value="lastused" selected>Most recently Used</option>
+		    	<option value="created">Most recently Created</option>
+		    	<option value="default">Friendly Name</option>
+		    </select>
+		    &nbsp; <a href="#" onclick="refreshRegistrations()">Refresh</a>
+		    <br />
+			<table id="fido2registrationsTable" border="1">
+				<tr><th>Friendly Name</th><th>Brand</th><th>RP ID</th><th>Enabled</th><th>Validated</th><th>Created</th><th>Last Used</th><th>Operations</th></tr>
+			</table>
+		<br>
+		</div>
+		<h2 class="sectionTitle">New Registration</h2>
+		<input type="checkbox" id="advancedOptions" onclick="toggleAdvancedOptions() "/>&nbsp;Show Advanced Registration Options (e.g. to select resident key)
+		<div id="aodiv" style="display:none">
+		    <table border="0">
+		    	<tr><td><b>Exclude Credentials</b></td></tr>
+		    	<tr><td><input type="checkbox" id="excludeCredentials" checked />&nbsp;Use existing registrations for excludeCredentials</td></tr>
+		    	<tr><td><b>Authenticator Selection Criteria</b></td></tr>
+		    	<tr><td><input type="checkbox" id="requireResidentKey" />&nbsp;Require Resident Key (you need this for the Usernameless login scenario)</td></tr>
+		    	<tr>
+		    	  <td>User Verification:&nbsp;
+		    	    <select id="userVerification">
+		    	      <option value="required">required</option>
+		    	      <option value="preferred" selected>preferred</option>
+		    	      <option value="discouraged">discouraged</option>
+		    	    </select>
+		    	  </td>
+		    	</tr>
+		    	<tr>
+		    	  <td>Authenticator Attachment:&nbsp;
+		    	    <select id="authenticatorAttachment">
+		    	      <option value="none" selected>unspecified</option>
+		    	      <option value="platform">platform</option>
+		    	      <option value="cross-platform">cross-platform</option>
+		    	    </select>
+		    	  </td>
+		    	</tr>
+		    	<tr><td><b>Attestation Conveyance Preference</b></td></tr>
+		    	<tr>
+		    	  <td>Preference:&nbsp;
+		    	    <select id="attestationConveyancePreference">
+		    	      <option value="none">none</option>
+		    	      <option value="indirect">indirect</option>
+		    	      <option value="direct" selected>direct</option>
+		    	    </select>
+		    	  </td>
+		    	</tr>
+		    </table>
+		</div>
+	    <br /><input type="button" value="Register Authenticator" onclick="register()" />
+	    <br />      		
+		<div id="nicknamediv" style="display:none">
+		<br />
+		Registration nickname:&nbsp;&nbsp;<input type="text" id="nickname" size="20" />
+		&nbsp;&nbsp;<input type="button" onclick="processNickname()" value="Save Registration" />
+		</div>
+		<br />
+	</div>
+	<div id="detailsDiv" style="display:none">
+		<h2 class="sectionTitle">Details</h2>
+		<div id="detailsMsgDiv">
+		</div>
+	</div>
+</body>
+</html>
