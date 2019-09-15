@@ -956,11 +956,6 @@ function androidRegisterRequest(req, rsp) {
 
 					if (req.body.authenticatorSelection != null) {
 						reqBody["authenticatorSelection"] = req.body.authenticatorSelection;
-
-						// This shouldn't actually be necessary...
-						if (reqBody.authenticatorSelection["requireResidentKey"] == null) {
-							reqBody.authenticatorSelection.requireResidentKey = false;
-						}
 					}
 
 					// call CI
