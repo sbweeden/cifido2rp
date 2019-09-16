@@ -23,7 +23,7 @@ app.use(session({
 }));
 
 app.use(express.json());
-app.use(express.urlencoded());
+app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 
 // http://expressjs.com/en/starter/static-files.html
