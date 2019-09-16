@@ -1,25 +1,35 @@
 //
-// OAuthTokenManager - performs client_credentials flow as necessary to get an OAuth token
-// and execute a function with that token.
+// OAuthTokenManager - looks after APIs needed to get or refresh access tokens
 //
 const requestp = require('request-promise-native');
 const logger = require('./logging.js');
 const fido2error = require('./fido2error.js');
 
-var tokenResponse = null;
-
-function setTokenResponse(tr) {
-	tokenResponse = tr;
-}
+// this is only used for a shared admin access token, not for OIDC token responses
+// which have to be per-session
+var adminTokenResponse = null;
 
 /**
 * Obtain a promise for a new access token. The reason that requestp is wrapped in a new promise
 * is to allow normalisation of the error to a fido2error.fido2Error.
 */
-function getAccessToken() {
+function getAccessToken(req) {
 	return new Promise((resolve, reject) => {
 		// if the current access token has more than two minutes to live, use it, otherwise get a new one
 		var now = new Date();
+
+		// determine if we are going to work with a per-session tokenResponse from OIDC, or the shared
+		// admin access token response
+		var isSessionTokenResponse = true;
+		var tokenResponse = null;
+		if (req != null && req.session != null && req.session.tokenResponse != null) {
+			tokenResponse = req.session.tokenResponse;
+		}
+		// if we haven't found a userTokenResponse, fallback to the admin token response
+		if (tokenResponse == null) {
+			isSessionTokenResponse = false;
+			tokenResponse = adminTokenResponse;
+		}
 
 		if (tokenResponse != null && tokenResponse.expires_at_ms > (now.getTime() + (2*60*1000))) {
 			resolve(tokenResponse.access_token);
@@ -54,11 +64,19 @@ function getAccessToken() {
 
 			requestp(options).then((tr) => {
 				if (tr && tr.access_token) {
-					tokenResponse = tr;
 					// compute this
 					var now = new Date();
-					tokenResponse.expires_at_ms = now.getTime() + (tokenResponse.expires_in * 1000);
-					resolve(tokenResponse.access_token);
+					tr.expires_at_ms = now.getTime() + (tr.expires_in * 1000);
+
+					// store the new token response back in either session or global cache
+					if (isSessionTokenResponse) {
+						req.session.tokenResponse = tr;
+					} else {
+						adminTokenResponse = tr;
+					}
+
+
+					resolve(tr.access_token);
 				} else {
 					console.log("oauthtokenmanager requestp(options) unexpected token response: " + (tr != null) ? JSON.stringify(tr) : "null");
 					var err = new fido2error.fido2Error("Did not get access token in token response");
@@ -79,6 +97,5 @@ function getAccessToken() {
 }
 
 module.exports = { 
-	setTokenResponse: setTokenResponse,
 	getAccessToken: getAccessToken
 };

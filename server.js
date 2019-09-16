@@ -49,17 +49,10 @@ passport.use("oidc", new oidcStrategy({
 			sub: sub,
 			profile: profile,
 			accessToken: accessToken,
-			refreshToken: refreshToken,
-			done: done
+			refreshToken: refreshToken
 		};
 		console.log("OIDC callback function called with: " + JSON.stringify(data));
-		tm.setTokenResponse({
-			expires_at_ms: (new Date()).getTime() + (7200 * 1000),
-			expires_in: 7200,
-			refresh_token: refreshToken,
-			access_token: accessToken
-		});
-		return done(null, profile);
+		return done(null, data);
 	}
 ));
 
@@ -77,8 +70,15 @@ app.use("/callback",
 	passport.authenticate("oidc", { failureRedirect: "/error" }),
 	(req, res) => {
 		console.log("Callback post-authentication function called with req.user: " + JSON.stringify(req.user));
-		req.session.username = req.user.displayName;
-		req.session.userSCIMId = req.user.id;
+		req.session.username = req.user.profile.displayName;
+		req.session.userSCIMId = req.user.profile.id;
+		req.session.tokenResponse = {
+			expires_at_ms: (new Date()).getTime() + (7200 * 1000),
+			expires_in: 7200,
+			refresh_token: req.user.refreshToken,
+			access_token: req.user.accessToken
+		};
+
 		res.redirect('/');
 	});
 
@@ -91,7 +91,6 @@ app.get('/', (req, rsp) => {
 
 app.post('/login', (req, rsp) => {
 	// make sure we switch to the client_credentials OAuth client
-	tm.setTokenResponse(null);
 	identityServices.validateUsernamePassword(req, rsp);
 });
 
@@ -106,8 +105,6 @@ app.get('/test', (req,rsp) => {
 app.get('/logout', (req, rsp) => {
 	req.logout();
 	req.session.destroy();
-	// make sure that next session uses session-specific access token
-	tm.setTokenResponse(null);
   	rsp.json({"authenticated": false});
 });
 

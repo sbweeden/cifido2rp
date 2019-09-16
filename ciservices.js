@@ -95,7 +95,7 @@ function proxyFIDO2ServerRequest(req, rsp, validateUsername, allowEmptyUsername)
 	}
 
 	var access_token = null;
-	tm.getAccessToken()
+	tm.getAccessToken(req)
 	.then( (at) => {
 		access_token = at;		
 		return rpIdTorpUuid(process.env.RPID);
@@ -153,7 +153,7 @@ function validateFIDO2Login(req, rsp) {
 	var bodyToSend = req.body;
 	
 	var access_token = null;
-	tm.getAccessToken().then((at) => {
+	tm.getAccessToken(req).then((at) => {
 		access_token = at;		
 		return rpIdTorpUuid(process.env.RPID);
 	}).then((rpUuid) => {
@@ -190,7 +190,7 @@ function validateFIDO2Login(req, rsp) {
 				req.session.userSCIMId = scimResponse.Resources[0].id;
 				req.session.username = scimResponse.Resources[0].userName;
 
-				return getUserResponse(req.session.username, req.session.userSCIMId);
+				return getUserResponse(req);
 			} else {
 				throw new fido2error.fido2Error("User disabled");	
 			}
@@ -216,7 +216,7 @@ function deleteRegistration(req, rsp) {
 		var regId = req.body.id;
 		if (regId != null) {
 			var access_token = null;
-			tm.getAccessToken().then((at) => {
+			tm.getAccessToken(req).then((at) => {
 				access_token = at;
 				// first search for the suggested registration
 				return requestp({
@@ -268,7 +268,7 @@ function registrationDetails(req, rsp) {
 		var regId = req.query.id;
 		if (regId != null) {
 			var access_token = null;
-			tm.getAccessToken().then((at) => {
+			tm.getAccessToken(req).then((at) => {
 				access_token = at;
 				// first retrieve the suggested registration
 				return requestp({
@@ -303,7 +303,7 @@ function validateUsernamePassword(req, rsp) {
 	var username = req.body.username;
 	var password = req.body.password;
 
-	return tm.getAccessToken()
+	return tm.getAccessToken(req)
 	.then((access_token) => {
 		return requestp({
 			url: process.env.CI_TENANT_ENDPOINT + "/v2.0/Users/authentication",
@@ -324,7 +324,7 @@ function validateUsernamePassword(req, rsp) {
 		// logged in ok
 		req.session.username = username;
 		req.session.userSCIMId = scimResponse.id;
-		return getUserResponse(req.session.username, req.session.userSCIMId);
+		return getUserResponse(req);
 	}).then((userResponse) => {
 		rsp.json(userResponse);
 	}).catch((e)  => {
@@ -335,7 +335,7 @@ function validateUsernamePassword(req, rsp) {
 
 function updateRPMaps() {
 	// reads all relying parties from discovery service updates local caches
-	return tm.getAccessToken()
+	return tm.getAccessToken(null)
 	.then((access_token) => {
 		return requestp({
 			url: process.env.CI_TENANT_ENDPOINT + "/v2.0/factors/discover/fido2",
@@ -387,13 +387,17 @@ function coerceCIRegistrationsToClientFormat(registrationsResponse) {
 	});
 }
 
-function getUserResponse(username, userId) {
+function getUserResponse(req) {
+
+	var username = req.session.username;
+	var userId = req.session.userSCIMId;
+
 	var result = { "authenticated": true, "username": username, "credentials": []};
 	var search = 'userId="' + userId + '"';
 	// to futher filter results for just my rpId, add this
 	search += '&attributes/rpId="'+process.env.RPID+'"';
 
-	return tm.getAccessToken()
+	return tm.getAccessToken(req)
 	.then((access_token) => { 
 
 		var options = {
@@ -431,7 +435,7 @@ function sendUserResponse(req, rsp) {
 	if (req.session.username) {
 
 		var access_token = null;
-		getUserResponse(req.session.username, req.session.userSCIMId)
+		getUserResponse(req)
 		.then((userResponse) => {
 			rsp.json(userResponse);
 		}).catch((e)  => {
@@ -668,7 +672,7 @@ function getUsernameAndCredentialsResponse(req, username, requireSignedInCookie)
 		var access_token = null;
 		var rpUuid = null;
 		var userId = null;
-		return tm.getAccessToken()
+		return tm.getAccessToken(req)
 			.then((at) => {
 				access_token = at;
 				return rpIdTorpUuid(process.env.RPID);
@@ -845,7 +849,7 @@ function androidPassword(req, rsp) {
 	var password = req.body.password;
 	if (username != null && password != null) {
 		// validate username and password against CI
-		tm.getAccessToken()
+		tm.getAccessToken(req)
 		.then((access_token) => {
 			return requestp({
 				url: process.env.CI_TENANT_ENDPOINT + "/v2.0/Users/authentication",
@@ -916,7 +920,7 @@ function androidRegisterRequest(req, rsp) {
 
 	var username = req.cookies["username"];
 	if (username != null) {
-		tm.getAccessToken()
+		tm.getAccessToken(req)
 		.then((at) => {
 			access_token = at;
 			return rpIdTorpUuid(process.env.RPID);
@@ -1030,7 +1034,7 @@ function androidRegisterResponse(req, rsp) {
 		}
 
 		// validate the registration via the FIDO2 server
-		tm.getAccessToken()
+		tm.getAccessToken(req)
 		.then((at) => {
 			access_token = at;
 			return rpIdTorpUuid(process.env.RPID);
@@ -1096,7 +1100,7 @@ function androidRemoveKey(req, rsp) {
 		var credId = req.query.credId;
 		if (credId != null) {
 			// remove it so long as it belongs to this user
-			tm.getAccessToken()
+			tm.getAccessToken(req)
 			.then((at) => {
 				access_token = at;
 
@@ -1187,7 +1191,7 @@ function androidSigninRequest(req, rsp) {
 
 	var userId = null;
 
-	tm.getAccessToken()
+	tm.getAccessToken(req)
 	.then((at) => {
 		access_token = at;
 		return rpIdTorpUuid(process.env.RPID);
@@ -1278,7 +1282,7 @@ function androidSigninResponse(req, rsp) {
 	if (id != null && rawId != null && type != null && response != null) {
 
 		// validate the assertion via the FIDO2 server
-		tm.getAccessToken()
+		tm.getAccessToken(req)
 		.then((at) => {
 			access_token = at;
 			return rpIdTorpUuid(process.env.RPID);
