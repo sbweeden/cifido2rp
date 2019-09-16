@@ -442,6 +442,913 @@ function sendUserResponse(req, rsp) {
 	}
 }
 
+/**
+* Start of section dedicated to APIs used by the android app
+*/
+
+/**
+ * Extracts the bytes from an array beginning at index start, and continuing until 
+ * index end-1 or the end of the array is reached. Pass -1 for end if you want to 
+ * parse till the end of the array.
+ */
+function bytesFromArray(o, start, end) {
+	// o may be a normal array of bytes, or it could be a JSON encoded Uint8Array
+	var len = o.length;
+	if (len == null) {
+		len = Object.keys(o).length;
+	}
+	
+	var result = [];
+	for (var i = start; (end == -1 || i < end) && (i < len); i++) {
+		result.push(o[i]);
+	}
+	return result;
+}
+
+/*
+* returns true if o's keys are only "0", "1", ... "n"
+*/
+function integerKeys(o) {
+	var result = false;
+	if (o != null) {
+		var oKeys = Object.keys(o);
+		var intArray = [...Array(oKeys.length).keys()];
+		var result = true;
+		for (var i = 0; i < intArray.length && result; i++) {
+			if (oKeys[i] != ''+intArray[i]) {
+				result = false;
+			}
+		}
+	}
+	return result;
+}
+
+/*
+* Recursively inspect every element of o and if it is an object which is not already 
+* an Array and who's keys are only the numbers from 0...x then assume that object is an
+* ArrayBuffer and convert to BA.
+*/
+function convertArrayBuffersToByteArrays(o) {
+	if (o != null) {
+		Object.keys(o).forEach((k)=> {
+			if (typeof o[k] == "object") {
+				if (!Array.isArray(o[k]) && integerKeys(o[k])) {
+					o[k] = bytesFromArray(o[k], 0, -1);
+				} else {
+					convertArrayBuffersToByteArrays(o[k]);
+				}
+			}
+		});
+	}
+	return o;
+}
+
+/**
+* Converts a JSON COSE Key to a KJUR public key variable
+*/
+function coseKeyToPublicKey(k) {
+	var result = null;
+
+	if (k != null) {
+		// see https://tools.ietf.org/html/rfc8152
+		// and https://www.iana.org/assignments/cose/cose.xhtml
+		var kty = k["1"];
+		var alg = k["3"];
+
+		if (kty == 1) {
+			// EdDSA key type
+			validEDAlgs = [ -8 ];
+			if (validEDAlgs.indexOf(alg) >= 0) {
+				var crvMap = {
+						"6" : "Ed25519",
+						"7" : "Ed448"
+					};
+					var crv = crvMap['' + k["-1"]];
+					if (crv != null) {
+						console.log("No support for EdDSA keys");
+					} else {
+						console.log("Invalid crv: " + k["-1"] + " for ED key type");
+					}
+
+			} else {
+				console.log("Invalid alg: " + alg + " for ED key type");
+			}
+		} else if (kty == 2) {
+			// EC key type
+			validECAlgs = [ -7, -35, -36 ];
+
+			if (validECAlgs.indexOf(alg) >= 0) {
+				var crvMap = {
+					"1" : "P-256",
+					"2" : "P-384",
+					"3" : "P-521" // this is not a typo. It is 521
+				};
+				var crv = crvMap['' + k["-1"]];
+				if (crv != null) {
+					// ECDSA
+					var xCoordinate = bytesFromArray(k["-2"], 0, -1);
+					var yCoordinate = bytesFromArray(k["-3"], 0, -1);
+
+					if (xCoordinate != null && xCoordinate.length > 0
+							&& yCoordinate != null && yCoordinate.length > 0) {
+						result = KJUR.KEYUTIL.getKey({
+							"kty" : "EC",
+							"crv" : crv,
+							"x" : KJUR.hextob64(KJUR.BAtohex(xCoordinate)),
+							"y" : KJUR.hextob64(KJUR.BAtohex(yCoordinate))
+						});
+					} else {
+						console.log("Invalid x or y co-ordinates for EC key type");
+					}
+				} else {
+					console.log("Invalid crv: " + k["-1"] + " for EC key type");
+				}
+			} else {
+				console.log("Invalid alg: " + alg + " for EC key type");
+			}
+		} else if (kty == 3) {
+			// RSA key type
+			validRSAAlgs = [ -37, -38, -39, -257, -258, -259, -65535 ];
+			if (validRSAAlgs.indexOf(alg) >= 0) {
+				var n = bytesFromArray(k["-1"], 0, -1);
+				var e = bytesFromArray(k["-2"], 0, -1);
+				if (n != null && n.length > 0 && e != null && e.length > 0) {
+					result = KJUR.KEYUTIL.getKey({
+						"kty" : "RSA",
+						"n" : KJUR.hextob64(KJUR.BAtohex(n)),
+						"e" : KJUR.hextob64(KJUR.BAtohex(e))
+					});
+				} else {
+					console.log("Invalid n or e values for RSA key type");
+				}
+			} else {
+				console.log("Invalid alg: " + alg + " for RSA key type");
+			}
+		} else {
+			console.log("Unsupported key type: " + kty);
+		}
+	}
+	return result;
+}
+
+/**
+* Converts a KJUR public key object to a PEM string
+*/
+function publicKeyToPEM(pk) {
+	var result = "";
+	if (pk instanceof KJUR.RSAKey) {
+		result = KJUR.KEYUTIL.getPEM(pk);
+	} else if (pk instanceof KJUR.crypto.ECDSA) {
+		result = certToPEM(KJUR.b64toBA(KJUR.hextob64(pk.pubKeyHex)));
+	}
+	return result;			
+}
+
+/**
+ * Converts the bytes of an asn1-encoded X509 ceritificate or raw public key
+ * into a PEM-encoded cert string
+ */
+function certToPEM(cert) {
+	var keyType = "CERTIFICATE";
+	asn1key = cert;
+
+	if (cert != null && cert.length == 65 && cert[0] == 0x04) {
+		// this is a raw public key - prefix with ASN1 metadata
+		// SEQUENCE {
+		// SEQUENCE {
+		// OBJECTIDENTIFIER 1.2.840.10045.2.1 (ecPublicKey)
+		// OBJECTIDENTIFIER 1.2.840.10045.3.1.7 (P-256)
+		// }
+		// BITSTRING <raw public key>
+		// }
+		// We just need to prefix it with constant 26 bytes of metadata
+		asn1key = KJUR.b64toBA(KJUR.hextob64("3059301306072a8648ce3d020106082a8648ce3d030107034200"));
+		Array.prototype.push.apply(asn1key, cert);
+		keyType = "PUBLIC KEY";
+	}
+	var result = "-----BEGIN " + keyType + "-----\n";
+	var b64cert = KJUR.hextob64(KJUR.BAtohex(asn1key));
+	for (; b64cert.length > 64; b64cert = b64cert.slice(64)) {
+		result += b64cert.slice(0, 64) + "\n";
+	}
+	if (b64cert.length > 0) {
+		result += b64cert + "\n";
+	}
+	result += "-----END " + keyType + "-----\n";
+	return result;
+}
+
+function logRequest(api, req) {
+	console.log("API: " + api);
+	console.log("req keys: " + Object.keys(req));
+	console.log("req query: " + (req.query == null ? "" : JSON.stringify(req.query)));
+	console.log("req params: " + (req.params == null ? "" : JSON.stringify(req.params)));
+	console.log("req body: " + (req.body == null ? "" : JSON.stringify(req.body)));
+	console.log("req cookies: " + (req.cookies == null ? "" : JSON.stringify(req.cookies)));
+}
+
+/**
+* Promise-based function to return username and credentials response
+*/
+function getUsernameAndCredentialsResponse(req, username, requireSignedInCookie) {
+	var result = {};
+
+	// For this simple app, username is determined if two cookies exist
+	// signed-in=yes
+	// username=<value>
+	
+	// in a real app that should be replaced with oauth access tokens....
+	if (username == null) {
+		username = req.cookies["username"]; 
+	}
+	
+	if (username != null && (!requireSignedInCookie || req.cookies["signed-in"] == "yes")) {
+		result["username"] = req.cookies["username"];
+
+		var access_token = null;
+		var rpUuid = null;
+		var userId = null;
+		return tm.getAccessToken()
+			.then((at) => {
+				access_token = at;
+				return rpIdTorpUuid(process.env.RPID);
+			}).then((ruu) => {
+				rpUuid = ruu;
+
+				// now resolve username to userId
+				return requestp({
+					url: process.env.CI_TENANT_ENDPOINT + "/v2.0/Users",
+					method: "GET",
+					qs: { "filter" : 'userName eq "' + username + '"' },
+					headers: {
+						"Accept": "application/scim+json",
+						"Authorization": "Bearer " + access_token
+					},
+					json: true
+				});
+			}).then((scimResponse) => {
+				if (scimResponse && scimResponse.totalResults == 1) {
+					if (scimResponse.Resources[0].active) {
+						// ok to proceed
+						userId = scimResponse.Resources[0].id;
+
+						result["id"] = userId;
+
+						//
+						// Search based on userId and filter on the rpUuid as well
+						//						
+						var search = 'userId="' + userId + '"';
+						search += '&references/rpUuid="'+rpUuid+'"';
+
+						var options = {
+							url: process.env.CI_TENANT_ENDPOINT + "/v2.0/factors/fido2/registrations",
+							method: "GET",
+							qs: { "search" : search},
+							headers: {
+								"Accept": "application/json",
+								"Authorization": "Bearer " + access_token
+							},
+							json: true
+						};
+
+						var start = (new Date()).getTime();
+						return requestp(options).then((r) => {
+							var now = (new Date()).getTime();
+							console.log("getUsernameAndCredentialsResponse: call to get user registrations with options: " + JSON.stringify(options) + " took(msec): " + (now-start));
+							return r;
+						});
+					} else {
+						throw "user not active";
+					}
+				} else {
+					throw "user not found";
+				}
+			}).then((registrationsResponse) => {
+				// populate result credentials - filter to only include those for our rpID
+				result["credentials"] = [];
+				registrationsResponse.fido2.forEach((reg) => {
+					if (reg.attributes.rpId == process.env.RPID) {
+						// determine aaguidStr and publicKeyPEM
+						var aaguidStr = reg.attributes.aaGuid;
+						if (aaguidStr == null) {
+							aaguidStr = "00000000-0000-0000-0000-000000000000";
+						}
+						var coseKey = convertArrayBuffersToByteArrays(cbor.decodeFirstSync(KJUR.b64tohex(reg.attributes.credentialPublicKey)));
+						var pk = coseKeyToPublicKey(coseKey);
+						var publicKeyPEM = publicKeyToPEM(pk);
+
+						result.credentials.push({
+							"credId": reg.attributes.credentialId,
+							"aaguid": KJUR.hextob64u(aaguidStr.replace(/-/g,"")),
+							"publicKey": publicKeyPEM,
+							"prevCounter": (reg.attributes.counter != null ? reg.attributes.counter : 0)
+						});
+					}
+				});
+
+				// done
+				return result;
+			}).catch((e) => {
+				console.log("getUsernameAndCredentialsResponse exception: " + e);
+				result = {};
+				return result;
+			});
+	} else {
+		debugLog("getUsernameAndCredentialsResponse: It doesn't appear there is any user signed in!");
+	}
+	
+	return result;
+}
+
+function androidAssetLinks(req, rsp) {
+	rsp.json(
+		[
+		  {
+		    "relation": [
+		      "delegate_permission/common.handle_all_urls",
+		      "delegate_permission/common.get_login_creds"
+		    ],
+		    "target": {
+		      "namespace": "web",
+		      "site": "https://" + process.env.RPID
+		    }
+		  },
+		  {
+		    "relation": [
+		      "delegate_permission/common.handle_all_urls",
+		      "delegate_permission/common.get_login_creds"
+		    ],
+		    "target": {
+		      "namespace": "android_app",
+		      "package_name": "com.example.android.fido2",
+		      "sha256_cert_fingerprints": [
+		        process.env.ANDROID_CERT_FINGERPRINT
+		      ]
+		    }
+		  }
+		]
+	);	
+}
+
+function sendAndroidResponse(rsp, result) {
+	//console.log("sendAndroidResponse: called with result: " + JSON.stringify(result));
+	if (result.cookies) {
+		result.cookies.forEach((c) => {
+			//rsp.set('set-cookie', c);
+			rsp.cookie(c.name, c.value, c.options);
+		});
+	}
+	if (result.status != "ok") {
+		rsp.status(400);
+	}
+	rsp.json(result.body);
+}
+
+function androidUsername(req, rsp) {
+	//logRequest("androidUsername", req);
+
+	var result = {
+		"status": "ok",
+		"body": {},
+		"cookies": []
+	};
+
+	var username = req.body.username;
+	if (username != null) {
+		getUsernameAndCredentialsResponse(req, username, false)
+		.then((ucr) => {
+			result.body = ucr;
+			result.cookies.push({"name": "username", "value": username, "options":  { "path": "/"}});
+			sendAndroidResponse(rsp, result);
+		}).catch((e) => {
+			result.status = "failed";
+			result.body = {"error": "androidUsername unexpected error"};
+			sendAndroidResponse(rsp, result);
+		});
+		
+	} else {
+		result.status = "failed";
+		result.body = { "error": "no username supplied" };
+		sendAndroidResponse(rsp, result);
+	}
+}
+
+function androidPassword(req, rsp) {
+	logRequest("androidPassword", req);
+	var result = {
+		"status": "ok",
+		"body": {},
+		"cookies": []
+	};
+
+	var username = req.cookies["username"];
+	var password = req.body.password;
+	if (username != null && password != null) {
+		// validate username and password against CI
+		tm.getAccessToken()
+		.then((access_token) => {
+			return requestp({
+				url: process.env.CI_TENANT_ENDPOINT + "/v2.0/Users/authentication",
+				method: "POST",
+				headers: {
+					"Authorization": "Bearer " + access_token,
+					"Content-type": "application/scim+json",
+					"Accept": "application/scim+json"
+				},
+				json: true,
+				body: {
+					"userName" : username,
+					"password": password,
+					"schemas": ["urn:ietf:params:scim:schemas:ibm:core:2.0:AuthenticateUser"]
+				}
+			});
+		}).then((scimResponse) => {
+			// logged in ok
+			return getUsernameAndCredentialsResponse(req, username, false);
+		}).then((ucr) => {
+			result.body = ucr;
+			result.cookies.push({"name": "signed-in", "value": "yes", "options": {"path": "/"}});
+			sendAndroidResponse(rsp, result);
+		}).catch((e)  => {
+			console.log(e);
+			result.status = "failed";
+			result.body = {"error": "androidPassword authentication failed"};
+			sendAndroidResponse(rsp, result);
+		});
+	} else {
+		result.status = "failed";
+		result.body = { "error": "no username and password available" };
+		sendAndroidResponse(rsp, result);
+	}
+}
+
+function androidGetKeys(req, rsp) {
+	logRequest("androidGetKeys", req);
+	var result = {
+			"status": "ok",
+			"body": {
+			},
+			"cookies" : [
+			]
+		};
+	
+	getUsernameAndCredentialsResponse(req, null, false)
+	.then((ucr) => {
+		result.body = ucr;
+		sendAndroidResponse(rsp, result);
+	}).catch((e) => {
+		console.log(e);
+		result.status = "failed";
+		result.body = {"error": "androidGetKeys unexpected error"};
+		sendAndroidResponse(rsp, result);
+	});
+}
+
+function androidRegisterRequest(req, rsp) {
+	logRequest("androidRegisterRequest", req);
+	var result = {
+		"status": "ok",
+		"body": {
+		},
+		"cookies" : [
+		]
+	};
+
+	var username = req.cookies["username"];
+	if (username != null) {
+		tm.getAccessToken()
+		.then((at) => {
+			access_token = at;
+			return rpIdTorpUuid(process.env.RPID);
+		}).then((ruu) => {
+			rpUuid = ruu;
+
+			// now resolve username to check it's legit, and get display name
+			return requestp({
+				url: process.env.CI_TENANT_ENDPOINT + "/v2.0/Users",
+				method: "GET",
+				qs: { "filter" : 'userName eq "' + username + '"' },
+				headers: {
+					"Accept": "application/scim+json",
+					"Authorization": "Bearer " + access_token
+				},
+				json: true
+			});
+		}).then((scimResponse) => {
+			if (scimResponse && scimResponse.totalResults == 1) {
+				if (scimResponse.Resources[0].active) {
+					// ok to proceed
+					var user = scimResponse.Resources[0];
+
+					var displayName = username;
+					if (user.name != null && user.name.formatted != null && user.name.formatted.length > 0) {
+						displayName = user.name.formatted;
+					}
+
+					// prepare attestation options body for CI
+					var reqBody = {
+						"userId": user.id,
+						"displayName": displayName
+					};
+					if (req.body.attestation != null) {
+						reqBody["attestation"] = req.body.attestation;
+					}
+
+					if (req.body.authenticatorSelection != null) {
+						reqBody["authenticatorSelection"] = req.body.authenticatorSelection;
+					}
+
+					// call CI
+					var options = {
+						url: process.env.CI_TENANT_ENDPOINT + "/v2.0/factors/fido2/relyingparties/" + rpUuid + "/attestation/options",
+						method: "POST",
+						headers: {
+							"Content-type": "application/json",
+							"Accept": "application/json",
+							"Authorization": "Bearer " + access_token
+						},
+						json: true,
+						body: reqBody
+					};
+
+					return requestp(options);
+				} else {
+					throw "user not active";
+				}
+			} else {
+				throw "user not found";
+			}
+		}).then((rspBody) => {
+			// remove these - the android app doesn't understand them
+			delete rspBody["status"];
+			delete rspBody["errorMessage"];
+			delete rspBody["extensions"];
+
+			// also the androidapp only understands one algorithm, and if you pass it others, it fails
+			rspBody.pubKeyCredParams = [ { "alg": -7, "type": "public-key" } ];
+
+			result.body = rspBody;
+			sendAndroidResponse(rsp, result);
+		}).catch((e) => {
+			console.log(e);
+			result.status = "failed";
+			result.body = {"error": "androidRegisterRequest unexpected error"};
+			sendAndroidResponse(rsp, result);
+		});
+	} else {
+		result.status = "failed";
+		result.body = { "error": "no username supplied" };
+		sendAndroidResponse(rsp, result);
+	}
+}
+
+function androidRegisterResponse(req, rsp) {
+	logRequest("androidRegisterResponse", req);
+	var result = {
+		"status": "ok",
+		"body": {
+		},
+		"cookies" : [
+		]
+	};
+
+	// we require these to be present
+	var id = req.body.id;
+	var rawId = req.body.rawId;
+	var type = req.body.type;
+	var response = req.body.response;
+	var getClientExtensionResults = {};
+	if (req.body.getClientExtensionResults != null) {
+		getClientExtensionResults = req.body.getClientExtensionResults
+	}
+
+	if (id != null && rawId != null && type != null && response != null) {
+		// if friendlyName is provided, use it, otherwise call it "android-<datestr>"
+		var nickname = req.body.nickname;
+		if (nickname == null) {
+			nickname = "androidapp-" + (new Date()).toISOString();
+		}
+
+		// validate the registration via the FIDO2 server
+		tm.getAccessToken()
+		.then((at) => {
+			access_token = at;
+			return rpIdTorpUuid(process.env.RPID);
+		}).then((ruu) => {
+			rpUuid = ruu;
+
+			reqBody = {
+				"nickname": nickname,
+				"id": id,
+				"rawId": rawId,
+				"type": type,
+				"response": response,
+				"getClientExtensionResults": getClientExtensionResults,
+				"enabled": true
+			};
+
+			var options = {
+				url: process.env.CI_TENANT_ENDPOINT + "/v2.0/factors/fido2/relyingparties/" + rpUuid + "/attestation/result",
+				method: "POST",
+				headers: {
+					"Content-type": "application/json",
+					"Accept": "application/json",
+					"Authorization": "Bearer " + access_token
+				},
+				json: true,
+				body: reqBody
+			};
+
+			return requestp(options);
+		}).then((rspBody) => {
+			// worked
+			return getUsernameAndCredentialsResponse(req, null, false);
+		}).then((ucr) => {
+			result.body = ucr;
+			sendAndroidResponse(rsp, result);
+		}).catch((e) => {
+			console.log(e);
+			result.status = "failed";
+			result.body = {"error": "androidRegisterResponse unexpected error"};
+			sendAndroidResponse(rsp, result);
+		});
+
+	} else {
+		result.status = "failed";
+		result.body = { "error":"required parameters not present"};
+		sendAndroidResponse(rsp, result);
+	}
+}
+
+function androidRemoveKey(req, rsp) {
+	logRequest("androidRemoveKey", req);
+	var result = {
+			"status": "ok",
+			"body": {
+			},
+			"cookies" : [
+			]
+		};
+	var username = req.cookies["username"];
+	var userId = null;
+	if (username != null) {
+		// credId comes in on query string!
+		var credId = req.query.credId;
+		if (credId != null) {
+			// remove it so long as it belongs to this user
+			tm.getAccessToken()
+			.then((at) => {
+				access_token = at;
+
+				// resolve username to userId
+				return requestp({
+					url: process.env.CI_TENANT_ENDPOINT + "/v2.0/Users",
+					method: "GET",
+					qs: { "filter" : 'userName eq "' + username + '"' },
+					headers: {
+						"Accept": "application/scim+json",
+						"Authorization": "Bearer " + access_token
+					},
+					json: true
+				});
+			}).then((scimResponse) => {
+				if (scimResponse && scimResponse.totalResults == 1 && scimResponse.Resources[0].active) {
+					var user = scimResponse.Resources[0];
+					var search = 'attributes/credentialId="' + credId + '"&userId="' + user.id + '"';
+
+					// now get the registration - the search filter ensures ownership is also checked
+					return requestp({
+						url: process.env.CI_TENANT_ENDPOINT + "/v2.0/factors/fido2/registrations",
+						method: "GET",
+						qs: { "search" : search },
+						headers: {
+							"Accept": "application/json",
+							"Authorization": "Bearer " + access_token
+						},
+						json: true
+					});
+				} else{
+					throw "invalid or disabled user";
+				}
+			}).then((registrationsResponse) => {
+				// delete the registration if returned
+				//console.log("Received registrations response: " + JSON.stringify(registrationsResponse));
+
+				if (registrationsResponse.total == 1) {
+					var regId = registrationsResponse.fido2[0].id;
+
+					// delete it
+					return requestp({
+						url: process.env.CI_TENANT_ENDPOINT + "/v2.0/factors/fido2/registrations/" + regId,
+						method: "DELETE",
+						headers: {
+							"Accept": "application/json",
+							"Authorization": "Bearer " + access_token
+						},
+						json: true
+					}).then(() => {
+						logger.logWithTS("Registration deleted: " + regId);
+					});
+				}
+			}).then(() => {
+				// delete complete if credId was valid, just return an empty JSON object response
+				sendAndroidResponse(rsp, result);
+			}).catch((e) => {
+				console.log(e);
+				result.status = "failed";
+				result.body = {"error": "androidRemoveKey unexpected error"};
+				sendAndroidResponse(rsp, result);
+			});
+		} else {
+			result.status = "failed";
+			result.body = { "error": "missing credId" };
+			sendAndroidResponse(rsp, result);
+		}
+	} else {
+		result.status = "failed";
+		result.body = { "error": "no username supplied" };
+		sendAndroidResponse(rsp, result);
+	}		
+}
+
+function androidSigninRequest(req, rsp) {
+	logRequest("androidSigninRequest", req);
+	var result = {
+		"status": "ok",
+		"body": {
+		},
+		"cookies" : [
+		]
+	};
+
+	// may or may not be already logged in
+	var username = req.cookies["username"];
+
+
+	var userId = null;
+
+	tm.getAccessToken()
+	.then((at) => {
+		access_token = at;
+		return rpIdTorpUuid(process.env.RPID);
+	}).then((ruu) => {
+		rpUuid = ruu;
+
+		// if we have a username, resolve to check it's legit, and get userId
+		if (username != null) {
+			return requestp({
+				url: process.env.CI_TENANT_ENDPOINT + "/v2.0/Users",
+				method: "GET",
+				qs: { "filter" : 'userName eq "' + username + '"' },
+				headers: {
+					"Accept": "application/scim+json",
+					"Authorization": "Bearer " + access_token
+				},
+				json: true
+			}).then((scimResponse) => {
+				if (scimResponse && scimResponse.totalResults == 1 && scimResponse.Resources[0].active) {
+					userId = scimResponse.Resources[0].id;
+				}
+			});
+		}
+	}).then(() => {
+		// prepare assertion options body for CI
+		var reqBody = {
+			"userVerification": "preferred"
+		};
+
+		if (userId != null) {
+			reqBody["userId"] = userId;
+		}
+
+		if (req.body.attestation != null) {
+			reqBody["attestation"] = req.body.attestation;
+		}
+
+		// call CI
+		var options = {
+			url: process.env.CI_TENANT_ENDPOINT + "/v2.0/factors/fido2/relyingparties/" + rpUuid + "/assertion/options",
+			method: "POST",
+			headers: {
+				"Content-type": "application/json",
+				"Accept": "application/json",
+				"Authorization": "Bearer " + access_token
+			},
+			json: true,
+			body: reqBody
+		};
+		return requestp(options);
+	}).then((rspBody) => {
+		// remove these - the android app doesn't understand them
+		delete rspBody["status"];
+		delete rspBody["errorMessage"];
+		delete rspBody["extensions"];
+
+		//
+		// TODO: If the request included a credId, and the allowCredentials list in the response contains it,
+		// return only that one. I've never seen the demo app actually send a credId though...
+		//		
+
+		result.body = rspBody;
+		sendAndroidResponse(rsp, result);
+	}).catch((e) => {
+		console.log(e);
+		result.status = "failed";
+		result.body = {"error": "androidSigninRequest unexpected error"};
+		sendAndroidResponse(rsp, result);
+	});
+}
+
+function androidSigninResponse(req, rsp) {
+	logRequest("androidSigninResponse", req);
+	var result = {
+		"status": "ok",
+		"body": {
+		},
+		"cookies" : [
+		]
+	};
+
+	// we require these to be present
+	var id = req.body.id;
+	var rawId = req.body.rawId;
+	var type = req.body.type;
+	var response = req.body.response;
+
+	if (id != null && rawId != null && type != null && response != null) {
+
+		// validate the assertion via the FIDO2 server
+		tm.getAccessToken()
+		.then((at) => {
+			access_token = at;
+			return rpIdTorpUuid(process.env.RPID);
+		}).then((ruu) => {
+			rpUuid = ruu;
+
+			reqBody = {
+				"id": id,
+				"rawId": rawId,
+				"type": type,
+				"response": response
+			};
+
+			var options = {
+				url: process.env.CI_TENANT_ENDPOINT + "/v2.0/factors/fido2/relyingparties/" + rpUuid + "/assertion/result",
+				method: "POST",
+				headers: {
+					"Content-type": "application/json",
+					"Accept": "application/json",
+					"Authorization": "Bearer " + access_token
+				},
+				json: true,
+				body: reqBody
+			};
+			return requestp(options);
+		}).then((rspBody) => {
+			// worked - resolve userId to username and make sure they are real and still active
+			return requestp({
+				url: process.env.CI_TENANT_ENDPOINT + "/v2.0/Users",
+				method: "GET",
+				qs: { "filter" : 'id eq "' + rspBody.userId + '"' },
+				headers: {
+					"Accept": "application/scim+json",
+					"Authorization": "Bearer " + access_token
+				},
+				json: true
+			});
+		}).then((scimResponse) => {
+			if (scimResponse && scimResponse.totalResults == 1) {
+				if (scimResponse.Resources[0].active) {
+					// ok 
+					return scimResponse.Resources[0].userName;
+				} else {
+					throw "User disabled";
+				}
+			} else {
+				throw "User record not found";
+			}
+		}).then((username) => {
+			result.cookies.push({"name":"signed-in", "value":"yes", "options": { "path":"/"}});
+			result.cookies.push({"name":"username", "value": username, "options": { "path":"/"}});
+			result.cookies.push({"name":"challenge", "value":"", "options":{"path":"/", "expires": (new Date(0))}});
+
+			return getUsernameAndCredentialsResponse(req, username, false);
+		}).then((ucr) => {
+			result.body = ucr;
+			sendAndroidResponse(rsp, result);
+		}).catch((e) => {
+			console.log(e);
+			result.status = "failed";
+			result.body = {"error": "androidSigninResponse unexpected error"};
+			sendAndroidResponse(rsp, result);
+		});
+
+	} else {
+		result.status = "failed";
+		result.body = { "error":"required parameters not present"};
+		sendAndroidResponse(rsp, result);
+	}
+}
 
 
 module.exports = { 
@@ -450,5 +1357,14 @@ module.exports = {
 	deleteRegistration: deleteRegistration,
 	registrationDetails: registrationDetails,
 	proxyFIDO2ServerRequest: proxyFIDO2ServerRequest,
-	validateFIDO2Login: validateFIDO2Login
+	validateFIDO2Login: validateFIDO2Login,
+	androidAssetLinks: androidAssetLinks,
+	androidUsername: androidUsername,
+	androidPassword: androidPassword,
+	androidGetKeys: androidGetKeys,
+	androidRegisterRequest: androidRegisterRequest,
+	androidRegisterResponse: androidRegisterResponse,
+	androidRemoveKey: androidRemoveKey,
+	androidSigninRequest: androidSigninRequest,
+	androidSigninResponse: androidSigninResponse
 };

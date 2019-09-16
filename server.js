@@ -23,7 +23,7 @@ app.use(session({
 }));
 
 app.use(express.json());
-app.use(express.urlencoded());
+app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 
 // http://expressjs.com/en/starter/static-files.html
@@ -143,6 +143,48 @@ app.post('/assertion/login', (req, rsp) => {
 	identityServices.validateFIDO2Login(req,rsp);
 });
 
+/*
+ * Start section of URLs used by the android app
+ */
+app.get('/.well-known/assetlinks.json', (req, rsp) => {
+	identityServices.androidAssetLinks(req, rsp);
+});
+
+app.post('/auth/username', (req, rsp) => {
+	identityServices.androidUsername(req, rsp);
+});
+
+app.post('/auth/password', (req, rsp) => {
+	identityServices.androidPassword(req, rsp);
+});
+
+app.post('/auth/getKeys', (req, rsp) => {
+	identityServices.androidGetKeys(req, rsp);
+});
+
+app.post('/auth/registerRequest', (req, rsp) => {
+	identityServices.androidRegisterRequest(req, rsp);
+});
+
+app.post('/auth/registerResponse', (req, rsp) => {
+	identityServices.androidRegisterResponse(req, rsp);
+});
+
+app.post('/auth/removeKey', (req, rsp) => {
+	identityServices.androidRemoveKey(req, rsp);
+});
+
+app.post('/auth/signinRequest', (req, rsp) => {
+	identityServices.androidSigninRequest(req, rsp);
+});
+
+app.post('/auth/signinResponse', (req, rsp) => {
+	identityServices.androidSigninResponse(req, rsp);
+});
+
+/*
+ * End section of URLs used by the android app
+ */
 
 // listen for requests
 if (process.env.LOCAL_SSL_SERVER == "true") {
