@@ -4,7 +4,7 @@ This is a demonstration Node.js application that shows consumption of basic user
 
 There is a companion blog article I've written about this application which includes more detailed instructions and screenshots for how to set up the Cloud Identity tenant, and example runtime flows here:
 
-https://www.ibm.com/blogs/sweeden/TBD
+https://www.ibm.com/blogs/sweeden/cloud-identity-fido2-consuming-fido2-as-a-service-from-ibm-cloud-identity/
 
 To use:
 
