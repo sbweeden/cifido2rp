@@ -70,7 +70,8 @@ app.use("/callback",
 	passport.authenticate("oidc", { failureRedirect: "/error" }),
 	(req, res) => {
 		console.log("Callback post-authentication function called with req.user: " + JSON.stringify(req.user));
-		req.session.username = req.user.profile.displayName;
+		req.session.username = req.user.profile._json.preferred_username;
+		req.session.userDisplayName = req.user.profile.displayName;
 		req.session.userSCIMId = req.user.profile.id;
 		req.session.tokenResponse = {
 			expires_at_ms: (new Date()).getTime() + (7200 * 1000),

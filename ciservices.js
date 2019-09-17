@@ -189,6 +189,7 @@ function validateFIDO2Login(req, rsp) {
 				// ok to login
 				req.session.userSCIMId = scimResponse.Resources[0].id;
 				req.session.username = scimResponse.Resources[0].userName;
+				req.session.userDisplayName = getDisplayNameFromSCIMResponse(scimResponse.Resources[0]);
 
 				return getUserResponse(req);
 			} else {
@@ -299,12 +300,22 @@ function registrationDetails(req, rsp) {
 	}
 }
 
+function getDisplayNameFromSCIMResponse(scimResponse) {
+	var result = scimResponse.userName;
+	if (scimResponse.name != null && scimResponse.name.formatted != null) {
+		result = scimResponse.name.formatted;
+	}
+	return result;
+}
+
 function validateUsernamePassword(req, rsp) {
 	var username = req.body.username;
 	var password = req.body.password;
 
+	var access_token = null;
 	return tm.getAccessToken(req)
-	.then((access_token) => {
+	.then((at) => {
+		access_token = at;
 		return requestp({
 			url: process.env.CI_TENANT_ENDPOINT + "/v2.0/Users/authentication",
 			method: "POST",
@@ -320,11 +331,35 @@ function validateUsernamePassword(req, rsp) {
 				"schemas": ["urn:ietf:params:scim:schemas:ibm:core:2.0:AuthenticateUser"]
 			}
 		});
+	}).then((authenticationResponse) => {
+		// username/password ok
+
+		// get full user profile so that we can check user active and get display name
+		return requestp({
+			url: process.env.CI_TENANT_ENDPOINT + "/v2.0/Users",
+			method: "GET",
+			qs: { "filter" : 'id eq "' + authenticationResponse.id + '"' },
+			headers: {
+				"Accept": "application/scim+json",
+				"Authorization": "Bearer " + access_token
+			},
+			json: true
+		});
 	}).then((scimResponse) => {
-		// logged in ok
-		req.session.username = username;
-		req.session.userSCIMId = scimResponse.id;
-		return getUserResponse(req);
+		if (scimResponse && scimResponse.totalResults == 1) {
+			if (scimResponse.Resources[0].active) {
+				// ok to login
+				req.session.userSCIMId = scimResponse.Resources[0].id;
+				req.session.username = scimResponse.Resources[0].userName;
+				req.session.userDisplayName = getDisplayNameFromSCIMResponse(scimResponse.Resources[0]);
+
+				return getUserResponse(req);
+			} else {
+				throw new fido2error.fido2Error("User disabled");	
+			}
+		} else {
+			throw new fido2error.fido2Error("User record not found");
+		}
 	}).then((userResponse) => {
 		rsp.json(userResponse);
 	}).catch((e)  => {
@@ -391,8 +426,10 @@ function getUserResponse(req) {
 
 	var username = req.session.username;
 	var userId = req.session.userSCIMId;
+	var displayName = req.session.userDisplayName;
 
-	var result = { "authenticated": true, "username": username, "credentials": []};
+	var result = { "authenticated": true, "username": username, "displayName": displayName, "credentials": []};
+
 	var search = 'userId="' + userId + '"';
 	// to futher filter results for just my rpId, add this
 	search += '&attributes/rpId="'+process.env.RPID+'"';
