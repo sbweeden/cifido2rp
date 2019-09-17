@@ -159,9 +159,14 @@
 			}
 		}
 
+		function getDisplayName() {
+			// username is guaranteed, but displayName preferred
+			return (userData.displayName != null ? userData.displayName : userData.username);
+		}
+
 		function populateFido2Div() {
 			document.getElementById("usernameDiv").innerHTML = 
-				'Hi <b>' + htmlEncode(userData.username) + '</b>.&nbsp;&nbsp;<a href="javascript:doLogout()">Logout</a>' ;
+				'Hi <b>' + htmlEncode(getDisplayName()) + '</b>.&nbsp;&nbsp;<a href="javascript:doLogout()">Logout</a>' ;
 
 			// hide the table in case this is a re-sort
 			hideDiv("erDiv");
@@ -432,7 +437,7 @@
 			var options = {};
 			if (userData.authenticated) {
 				options["username"] = userData.username;
-				options["displayName"] = userData.username;
+				options["displayName"] = getDisplayName();
 			}
 			
 			options["authenticatorSelection"] = {
