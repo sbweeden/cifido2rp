@@ -384,7 +384,9 @@ function updateRPMaps() {
 	}).then((discoverResponse) => {
 		rpUuidMap = [];
 		rpIdMap = [];
-		discoverResponse.fido2.relyingParties.forEach((rp) => {
+		// there is a response message schema change happening - tolerate the old and new...
+		var rpWrapper = (discoverResponse.fido2 != null ? discoverResponse.fido2 : discoverResponse);
+		rpWrapper.relyingParties.forEach((rp) => {
 			rpUuidMap[rp.id] = rp.rpId;
 			rpIdMap[rp.rpId] = rp.id;
 		});
