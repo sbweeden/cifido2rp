@@ -27,3 +27,6 @@ CI tenant requirements:
 1. Create a FIDO2 RP definition for the RPID www.cifido2rp.com. Optionally upload metadata.
 1. Optionally create an OpenID Connect application configuration for the demonstration application.
 
+## Other notes
+Inspiration for how to create certificate files from: https://steffodimfelt.medium.com/how-to-make-node-js-running-https-localhost-on-macos-67b0840ad4c5
+
