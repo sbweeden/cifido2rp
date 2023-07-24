@@ -8,7 +8,7 @@ const https = require('https');
 const fs = require('fs');
 const passport = require('passport');
 const cookieParser = require("cookie-parser");
-const oidcStrategy = require('passport-openidconnect').Strategy;
+const oidcClient = require('openid-client');
 const tm = require('./oauthtokenmanager.js');
 const identityServices = require('./ciservices.js');
 const app = express();
@@ -33,28 +33,59 @@ app.use('/static', express.static('public'));
 app.use(passport.initialize());
 app.use(passport.session());
 
-passport.use("oidc", new oidcStrategy({
-	issuer: process.env.CI_TENANT_ENDPOINT + "/oidc/endpoint/default",
-	authorizationURL: process.env.CI_TENANT_ENDPOINT + "/oidc/endpoint/default/authorize",
-	tokenURL: process.env.CI_TENANT_ENDPOINT + "/oidc/endpoint/default/token",
-	userInfoURL: process.env.CI_TENANT_ENDPOINT + "/oidc/endpoint/default/userinfo",
-	clientID: process.env.OIDC_CLIENT_ID,
-	clientSecret: process.env.OIDC_CLIENT_SECRET,
-	callbackURL: "https://"+process.env.RPID+ (process.env.LOCAL_SSL_SERVER == "true" ? (":"+process.env.LOCAL_SSL_PORT) : "") +"/callback",
-	scope: "openid profile"
-	}, 
-	(issuer, sub, profile, accessToken, refreshToken, done) => {
-		var data = {
-			issuer: issuer,
-			sub: sub,
-			profile: profile,
-			accessToken: accessToken,
-			refreshToken: refreshToken
-		};
-		console.log("OIDC callback function called with: " + JSON.stringify(data));
-		return done(null, data);
-	}
-));
+// check we can get OIDC information, and if we can, include that as a login option
+oidcClient.Issuer.discover(process.env.CI_TENANT_ENDPOINT + "/oidc/endpoint/default/.well-known/openid-configuration")
+.then((isvIssuer) => {
+	//console.log('isvIssuer.metadata: ' + JSON.stringify(isvIssuer.metadata));
+
+	let myClient = new isvIssuer.Client({
+		client_id: process.env.OIDC_CLIENT_ID,
+		client_secret: process.env.OIDC_CLIENT_SECRET,
+		redirect_uris: [ "https://"+process.env.RPID+ (process.env.LOCAL_SSL_SERVER == "true" ? (":"+process.env.LOCAL_SSL_PORT) : "") + "/callback" ],
+		response_types: ['code']
+	});
+
+	passport.use("oidc", new oidcClient.Strategy(
+		// see https://github.com/panva/node-openid-client/blob/main/docs/README.md#strategy
+		{
+			client: myClient,
+			params: {
+				scope: "openid profile"
+			},
+			passReqToCallback: false,
+			usePKCE: true
+		},
+		(tokenSet, userinfo, done) => {
+			var data = {
+				tokenSet: tokenSet,
+				userinfo: userinfo
+			};
+			//console.log("OIDC callback function called with: " + JSON.stringify(data));
+			return done(null, data);
+		})
+	);
+}).then(() => {
+	// setup the login URL
+	app.use("/loginoidc", passport.authenticate("oidc"));
+}).then(() => {
+	// set up the OIDC callback URL
+	app.use("/callback", 
+		passport.authenticate("oidc", { failureRedirect: "/error" }),
+		(req, res) => {
+			//console.log("Callback post-authentication function called with req.user: " + JSON.stringify(req.user));
+			req.session.username = req.user.userinfo.preferred_username;
+			req.session.userDisplayName = req.user.userinfo.displayName;
+			req.session.userSCIMId = req.user.userinfo.sub;
+			req.session.tokenResponse = {
+				expires_at_ms: (req.user.tokenSet.expires_at * 1000),
+				expires_in: Math.round(((new Date(req.user.tokenSet.expires_at*1000)).getTime() - (new Date()).getTime())/1000),
+				refresh_token: req.user.tokenSet.refresh_token,
+				access_token: req.user.tokenSet.access_token
+			};
+			res.redirect('/');
+		}
+	);
+});
 
 passport.serializeUser((user, next) => {
 	next(null, user);
@@ -64,24 +95,8 @@ passport.deserializeUser((obj, next) => {
 	next(null, obj);
 });
 
-app.use("/loginoidc", passport.authenticate("oidc"));
 
-app.use("/callback", 
-	passport.authenticate("oidc", { failureRedirect: "/error" }),
-	(req, res) => {
-		console.log("Callback post-authentication function called with req.user: " + JSON.stringify(req.user));
-		req.session.username = req.user.profile._json.preferred_username;
-		req.session.userDisplayName = req.user.profile.displayName;
-		req.session.userSCIMId = req.user.profile.id;
-		req.session.tokenResponse = {
-			expires_at_ms: (new Date()).getTime() + (7200 * 1000),
-			expires_in: 7200,
-			refresh_token: req.user.refreshToken,
-			access_token: req.user.accessToken
-		};
 
-		res.redirect('/');
-	});
 
 //console.log(process.env);
 
@@ -104,9 +119,10 @@ app.get('/test', (req,rsp) => {
 });
 
 app.get('/logout', (req, rsp) => {
-	req.logout();
-	req.session.destroy();
-  	rsp.json({"authenticated": false});
+	req.logout(() => {
+		req.session.destroy();
+		rsp.json({"authenticated": false});  
+	});
 });
 
 app.get('/me', (req, rsp) => {

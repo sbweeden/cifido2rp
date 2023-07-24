@@ -3,7 +3,6 @@
 //
 const KJUR = require('jsrsasign');
 const cbor = require('cbor');
-const requestp = require('request-promise-native');
 const logger = require('./logging.js');
 const tm = require('./oauthtokenmanager.js');
 const fido2error = require('./fido2error.js');
@@ -40,6 +39,36 @@ function handleErrorResponse(methodName, rsp, e, genericError) {
 
 	logger.logWithTS("handleErrorResponse sending error response: " + JSON.stringify(fidoError));	
 	rsp.json(fidoError);
+}
+
+/**
+ * Just calls fetch, but then does some standardized result/error handling for JSON-based API calls
+ */
+function myfetch(url, fetchOptions) {
+
+	let returnAsJSON = false;
+	if (fetchOptions["returnAsJSON"] != null) {
+		returnAsJSON = fetchOptions.returnAsJSON;
+		delete fetchOptions.returnAsJSON;
+	}
+
+	return fetch(
+		url,
+		fetchOptions
+	).then((result) => {
+		if (returnAsJSON) {
+			if (!result.ok) {
+				logger.logWithTS("myfetch unexpected result. status: " + result.status);
+				return result.text().then((txt) => {
+					throw new fido2error.fido2Error("Unexpected HTTP response code: " + result.status + (txt != null ? (" body: " + txt) : ""));
+				});
+			} else {
+				return result.json();
+			}
+		} else {
+			return result;
+		}
+	});
 }
 
 /**
@@ -101,18 +130,20 @@ function proxyFIDO2ServerRequest(req, rsp, validateUsername, allowEmptyUsername)
 		return rpIdTorpUuid(process.env.RPID);
 	}).then((rpUuid) => {
 		var options = {
-			url: process.env.CI_TENANT_ENDPOINT + "/v2.0/factors/fido2/relyingparties/" + rpUuid + req.url,
 			method: "POST",
 			headers: {
 				"Content-type": "application/json",
 				"Accept": "application/json",
 				"Authorization": "Bearer " + access_token
 			},
-			json: true,
-			body: bodyToSend
+			returnAsJSON: true,
+			body: JSON.stringify(bodyToSend)
 		};
 		logger.logWithTS("proxyFIDO2ServerRequest.options: " + JSON.stringify(options));
-		return requestp(options);
+		return myfetch(
+			process.env.CI_TENANT_ENDPOINT + "/v2.0/factors/fido2/relyingparties/" + rpUuid + req.url,
+			options
+		);
 	}).then((proxyResponse) => {
 		// worked - add server spec status and error message fields
 		var rspBody = proxyResponse;
@@ -157,32 +188,35 @@ function validateFIDO2Login(req, rsp) {
 		access_token = at;		
 		return rpIdTorpUuid(process.env.RPID);
 	}).then((rpUuid) => {
-		return requestp({
-			url: process.env.CI_TENANT_ENDPOINT + "/v2.0/factors/fido2/relyingparties/" + rpUuid + "/assertion/result",
-			method: "POST",
-			headers: {
-				"Content-type": "application/json",
-				"Accept": "application/json",
-				"Authorization": "Bearer " + access_token
-			},
-			json: true,
-			body: bodyToSend
-		});
+		return myfetch(
+			process.env.CI_TENANT_ENDPOINT + "/v2.0/factors/fido2/relyingparties/" + rpUuid + "/assertion/result",
+			{
+				method: "POST",
+				headers: {
+					"Content-type": "application/json",
+					"Accept": "application/json",
+					"Authorization": "Bearer " + access_token
+				},
+				body: JSON.stringify(bodyToSend),
+				returnAsJSON: true
+			}
+		);
 	}).then((assertionResult) => {
 		// FIDO2 login worked
 		logger.logWithTS("validateFIDO2Login.assertionResult: " + JSON.stringify(assertionResult));
 
 		// lookup user from id to make sure they are real and still active
-		return requestp({
-			url: process.env.CI_TENANT_ENDPOINT + "/v2.0/Users",
-			method: "GET",
-			qs: { "filter" : 'id eq "' + assertionResult.userId + '"' },
-			headers: {
-				"Accept": "application/scim+json",
-				"Authorization": "Bearer " + access_token
-			},
-			json: true
-		});
+		return myfetch(
+			process.env.CI_TENANT_ENDPOINT + "/v2.0/Users?" + new URLSearchParams({ "filter" : 'id eq "' + assertionResult.userId + '"' }),
+			{
+				method: "GET",
+				headers: {
+					"Accept": "application/scim+json",
+					"Authorization": "Bearer " + access_token
+				},
+				returnAsJSON: true
+			}
+		);
 	}).then((scimResponse) => {
 		if (scimResponse && scimResponse.totalResults == 1) {
 			if (scimResponse.Resources[0].active) {
@@ -220,27 +254,30 @@ function deleteRegistration(req, rsp) {
 			tm.getAccessToken(req).then((at) => {
 				access_token = at;
 				// first search for the suggested registration
-				return requestp({
-					url: process.env.CI_TENANT_ENDPOINT + "/v2.0/factors/fido2/registrations/" + regId,
-					method: "GET",
-					headers: {
-						"Accept": "application/json",
-						"Authorization": "Bearer " + access_token
-					},
-					json: true
-				});
-			}).then((regToDelete) => {
-				// is it owned by the currenty authenticated user
-				if (regToDelete.userId == req.session.userSCIMId) {
-					return requestp({
-						url: process.env.CI_TENANT_ENDPOINT + "/v2.0/factors/fido2/registrations/" + regId,
-						method: "DELETE",
+				return myfetch(
+					process.env.CI_TENANT_ENDPOINT + "/v2.0/factors/fido2/registrations/" + regId,
+					{
+						method: "GET",
 						headers: {
 							"Accept": "application/json",
 							"Authorization": "Bearer " + access_token
 						},
-						json: true
-					}).then(() => {
+						returnAsJSON: true
+					}
+				);
+			}).then((regToDelete) => {
+				// is it owned by the currenty authenticated user
+				if (regToDelete.userId == req.session.userSCIMId) {
+					return myfetch(
+						process.env.CI_TENANT_ENDPOINT + "/v2.0/factors/fido2/registrations/" + regId,
+						{
+							method: "DELETE",
+							headers: {
+								"Accept": "application/json",
+								"Authorization": "Bearer " + access_token
+							}
+						}
+					).then(() => {
 						logger.logWithTS("Registration deleted: " + regId);
 					});
 				} else {
@@ -272,15 +309,17 @@ function registrationDetails(req, rsp) {
 			tm.getAccessToken(req).then((at) => {
 				access_token = at;
 				// first retrieve the suggested registration
-				return requestp({
-					url: process.env.CI_TENANT_ENDPOINT + "/v2.0/factors/fido2/registrations/" + regId,
-					method: "GET",
-					headers: {
-						"Accept": "application/json",
-						"Authorization": "Bearer " + access_token
-					},
-					json: true
-				});
+				return myfetch(
+					process.env.CI_TENANT_ENDPOINT + "/v2.0/factors/fido2/registrations/" + regId,
+					{
+						method: "GET",
+						headers: {
+							"Accept": "application/json",
+							"Authorization": "Bearer " + access_token
+						},
+						returnAsJSON: true
+					}
+				);
 			}).then((reg) => {
 				logger.logWithTS("registrationDetails." + regId + " received: " + JSON.stringify(reg));
 				// check it is owned by the currenty authenticated user
@@ -316,36 +355,40 @@ function validateUsernamePassword(req, rsp) {
 	return tm.getAccessToken(req)
 	.then((at) => {
 		access_token = at;
-		return requestp({
-			url: process.env.CI_TENANT_ENDPOINT + "/v2.0/Users/authentication",
-			method: "POST",
-			headers: {
-				"Authorization": "Bearer " + access_token,
-				"Content-type": "application/scim+json",
-				"Accept": "application/scim+json"
-			},
-			json: true,
-			body: {
-				"userName" : username,
-				"password": password,
-				"schemas": ["urn:ietf:params:scim:schemas:ibm:core:2.0:AuthenticateUser"]
+		return myfetch(
+			process.env.CI_TENANT_ENDPOINT + "/v2.0/Users/authentication",
+			{
+				method: "POST",
+				headers: {
+					"Authorization": "Bearer " + access_token,
+					"Content-type": "application/scim+json",
+					"Accept": "application/scim+json"
+				},
+				body: JSON.stringify({
+					"userName" : username,
+					"password": password,
+					"schemas": ["urn:ietf:params:scim:schemas:ibm:core:2.0:AuthenticateUser"]
+				}),
+				returnAsJSON: true
 			}
-		});
+		);
 	}).then((authenticationResponse) => {
 		// username/password ok
 
 		// get full user profile so that we can check user active and get display name
-		return requestp({
-			url: process.env.CI_TENANT_ENDPOINT + "/v2.0/Users",
-			method: "GET",
-			qs: { "filter" : 'id eq "' + authenticationResponse.id + '"' },
-			headers: {
-				"Accept": "application/scim+json",
-				"Authorization": "Bearer " + access_token
-			},
-			json: true
-		});
+		return myfetch(
+			process.env.CI_TENANT_ENDPOINT + "/v2.0/Users?" + new URLSearchParams({ "filter" : 'id eq "' + authenticationResponse.id + '"' }),
+			{
+				method: "GET",
+				headers: {
+					"Accept": "application/scim+json",
+					"Authorization": "Bearer " + access_token
+				},
+				returnAsJSON: true
+			}
+		);
 	}).then((scimResponse) => {
+		//logger.logWithTS("ciservices.validateUsernamePassword got scimResponse: " + JSON.stringify(scimResponse));
 		if (scimResponse && scimResponse.totalResults == 1) {
 			if (scimResponse.Resources[0].active) {
 				// ok to login
@@ -372,15 +415,17 @@ function updateRPMaps() {
 	// reads all relying parties from discovery service updates local caches
 	return tm.getAccessToken(null)
 	.then((access_token) => {
-		return requestp({
-			url: process.env.CI_TENANT_ENDPOINT + "/v2.0/factors/discover/fido2",
-			method: "GET",
-			headers: {
-				"Accept": "application/json",
-				"Authorization": "Bearer " + access_token
-			},
-			json: true
-		});
+		return myfetch(
+			process.env.CI_TENANT_ENDPOINT + "/v2.0/factors/discover/fido2",
+			{
+				method: "GET",
+				headers: {
+					"Accept": "application/json",
+					"Authorization": "Bearer " + access_token
+				},
+				returnAsJSON: true
+			}
+		);
 	}).then((discoverResponse) => {
 		rpUuidMap = [];
 		rpIdMap = [];
@@ -438,23 +483,21 @@ function getUserResponse(req) {
 
 	return tm.getAccessToken(req)
 	.then((access_token) => { 
-
-		var options = {
-			url: process.env.CI_TENANT_ENDPOINT + "/v2.0/factors/fido2/registrations",
-			method: "GET",
-			qs: { "search" : search},
-			headers: {
-				"Accept": "application/json",
-				"Authorization": "Bearer " + access_token
-			},
-			json: true
-		};
-
 		// This includes an example of how to measure the response time for a call
 		var start = (new Date()).getTime();
-		return requestp(options).then((r) => {
+		return myfetch(
+			process.env.CI_TENANT_ENDPOINT + "/v2.0/factors/fido2/registrations?" + new URLSearchParams({ "search" : search}),
+			{
+				method: "GET",
+				headers: {
+					"Accept": "application/json",
+					"Authorization": "Bearer " + access_token
+				},
+				returnAsJSON: true	
+			}
+		).then((r) => {
 			var now = (new Date()).getTime();
-			console.log("getUserResponse: call to get user registrations with options: " + JSON.stringify(options) + " took(msec): " + (now-start));
+			console.log("getUserResponse: call to get user registrations took(msec): " + (now-start));
 			return r;
 		});
 	}).then((registrationsResponse) => {
@@ -719,16 +762,17 @@ function getUsernameAndCredentialsResponse(req, username, requireSignedInCookie)
 				rpUuid = ruu;
 
 				// now resolve username to userId
-				return requestp({
-					url: process.env.CI_TENANT_ENDPOINT + "/v2.0/Users",
-					method: "GET",
-					qs: { "filter" : 'userName eq "' + username + '"' },
-					headers: {
-						"Accept": "application/scim+json",
-						"Authorization": "Bearer " + access_token
-					},
-					json: true
-				});
+				return myfetch(
+					process.env.CI_TENANT_ENDPOINT + "/v2.0/Users?" + new URLSearchParams({ "filter" : 'userName eq "' + username + '"' }),
+					{
+						method: "GET",
+						headers: {
+							"Accept": "application/scim+json",
+							"Authorization": "Bearer " + access_token
+						},
+						returnAsJSON: true
+					}
+				);
 			}).then((scimResponse) => {
 				if (scimResponse && scimResponse.totalResults == 1) {
 					if (scimResponse.Resources[0].active) {
@@ -743,19 +787,21 @@ function getUsernameAndCredentialsResponse(req, username, requireSignedInCookie)
 						var search = 'userId="' + userId + '"';
 						search += '&references/rpUuid="'+rpUuid+'"';
 
+						var url = process.env.CI_TENANT_ENDPOINT + "/v2.0/factors/fido2/registrations?" + new URLSearchParams({ "search" : search});
 						var options = {
-							url: process.env.CI_TENANT_ENDPOINT + "/v2.0/factors/fido2/registrations",
 							method: "GET",
-							qs: { "search" : search},
 							headers: {
 								"Accept": "application/json",
 								"Authorization": "Bearer " + access_token
 							},
-							json: true
+							returnAsJSON: true
 						};
 
 						var start = (new Date()).getTime();
-						return requestp(options).then((r) => {
+						return myfetch(
+							url,
+							options
+						).then((r) => {
 							var now = (new Date()).getTime();
 							console.log("getUsernameAndCredentialsResponse: call to get user registrations with options: " + JSON.stringify(options) + " took(msec): " + (now-start));
 							return r;
@@ -890,21 +936,23 @@ function androidPassword(req, rsp) {
 		// validate username and password against CI
 		tm.getAccessToken(req)
 		.then((access_token) => {
-			return requestp({
-				url: process.env.CI_TENANT_ENDPOINT + "/v2.0/Users/authentication",
-				method: "POST",
-				headers: {
-					"Authorization": "Bearer " + access_token,
-					"Content-type": "application/scim+json",
-					"Accept": "application/scim+json"
-				},
-				json: true,
-				body: {
-					"userName" : username,
-					"password": password,
-					"schemas": ["urn:ietf:params:scim:schemas:ibm:core:2.0:AuthenticateUser"]
+			return myfetch(
+				process.env.CI_TENANT_ENDPOINT + "/v2.0/Users/authentication",
+				{
+					method: "POST",
+					headers: {
+						"Authorization": "Bearer " + access_token,
+						"Content-type": "application/scim+json",
+						"Accept": "application/scim+json"
+					},
+					body: JSON.stringify({
+						"userName" : username,
+						"password": password,
+						"schemas": ["urn:ietf:params:scim:schemas:ibm:core:2.0:AuthenticateUser"]
+					}),
+					returnAsJSON: true
 				}
-			});
+			);
 		}).then((scimResponse) => {
 			// logged in ok
 			return getUsernameAndCredentialsResponse(req, username, false);
@@ -967,16 +1015,17 @@ function androidRegisterRequest(req, rsp) {
 			rpUuid = ruu;
 
 			// now resolve username to check it's legit, and get display name
-			return requestp({
-				url: process.env.CI_TENANT_ENDPOINT + "/v2.0/Users",
-				method: "GET",
-				qs: { "filter" : 'userName eq "' + username + '"' },
-				headers: {
-					"Accept": "application/scim+json",
-					"Authorization": "Bearer " + access_token
-				},
-				json: true
-			});
+			return myfetch(
+				process.env.CI_TENANT_ENDPOINT + "/v2.0/Users?" + new URLSearchParams({ "filter" : 'userName eq "' + username + '"' }),
+				{
+					method: "GET",
+					headers: {
+						"Accept": "application/scim+json",
+						"Authorization": "Bearer " + access_token
+					},
+					returnAsJSON: true
+				}
+			);
 		}).then((scimResponse) => {
 			if (scimResponse && scimResponse.totalResults == 1) {
 				if (scimResponse.Resources[0].active) {
@@ -1002,19 +1051,19 @@ function androidRegisterRequest(req, rsp) {
 					}
 
 					// call CI
-					var options = {
-						url: process.env.CI_TENANT_ENDPOINT + "/v2.0/factors/fido2/relyingparties/" + rpUuid + "/attestation/options",
-						method: "POST",
-						headers: {
-							"Content-type": "application/json",
-							"Accept": "application/json",
-							"Authorization": "Bearer " + access_token
-						},
-						json: true,
-						body: reqBody
-					};
-
-					return requestp(options);
+					return myfetch(
+						process.env.CI_TENANT_ENDPOINT + "/v2.0/factors/fido2/relyingparties/" + rpUuid + "/attestation/options",
+						{
+							method: "POST",
+							headers: {
+								"Content-type": "application/json",
+								"Accept": "application/json",
+								"Authorization": "Bearer " + access_token
+							},
+							body: JSON.stringify(reqBody),
+							returnAsJSON: true
+						}
+					);
 				} else {
 					throw "user not active";
 				}
@@ -1090,19 +1139,19 @@ function androidRegisterResponse(req, rsp) {
 				"enabled": true
 			};
 
-			var options = {
-				url: process.env.CI_TENANT_ENDPOINT + "/v2.0/factors/fido2/relyingparties/" + rpUuid + "/attestation/result",
-				method: "POST",
-				headers: {
-					"Content-type": "application/json",
-					"Accept": "application/json",
-					"Authorization": "Bearer " + access_token
-				},
-				json: true,
-				body: reqBody
-			};
-
-			return requestp(options);
+			return myfetch(
+				process.env.CI_TENANT_ENDPOINT + "/v2.0/factors/fido2/relyingparties/" + rpUuid + "/attestation/result",
+				{
+					method: "POST",
+					headers: {
+						"Content-type": "application/json",
+						"Accept": "application/json",
+						"Authorization": "Bearer " + access_token
+					},
+					body: JSON.stringify(reqBody),
+					returnAsJSON: true
+				}
+			);
 		}).then((rspBody) => {
 			// worked
 			return getUsernameAndCredentialsResponse(req, null, false);
@@ -1144,32 +1193,34 @@ function androidRemoveKey(req, rsp) {
 				access_token = at;
 
 				// resolve username to userId
-				return requestp({
-					url: process.env.CI_TENANT_ENDPOINT + "/v2.0/Users",
-					method: "GET",
-					qs: { "filter" : 'userName eq "' + username + '"' },
-					headers: {
-						"Accept": "application/scim+json",
-						"Authorization": "Bearer " + access_token
-					},
-					json: true
-				});
+				return myfetch(
+					process.env.CI_TENANT_ENDPOINT + "/v2.0/Users?" + new URLSearchParams({ "filter" : 'userName eq "' + username + '"' }),
+					{
+						method: "GET",
+						headers: {
+							"Accept": "application/scim+json",
+							"Authorization": "Bearer " + access_token
+						},
+						returnAsJSON: true
+					}
+				);
 			}).then((scimResponse) => {
 				if (scimResponse && scimResponse.totalResults == 1 && scimResponse.Resources[0].active) {
 					var user = scimResponse.Resources[0];
 					var search = 'attributes/credentialId="' + credId + '"&userId="' + user.id + '"';
 
 					// now get the registration - the search filter ensures ownership is also checked
-					return requestp({
-						url: process.env.CI_TENANT_ENDPOINT + "/v2.0/factors/fido2/registrations",
-						method: "GET",
-						qs: { "search" : search },
-						headers: {
-							"Accept": "application/json",
-							"Authorization": "Bearer " + access_token
-						},
-						json: true
-					});
+					return myfetch(
+						process.env.CI_TENANT_ENDPOINT + "/v2.0/factors/fido2/registrations?" + new URLSearchParams({ "search" : search }),
+						{
+							method: "GET",
+							headers: {
+								"Accept": "application/json",
+								"Authorization": "Bearer " + access_token
+							},
+							returnAsJSON: true
+						}
+					);
 				} else{
 					throw "invalid or disabled user";
 				}
@@ -1181,15 +1232,16 @@ function androidRemoveKey(req, rsp) {
 					var regId = registrationsResponse.fido2[0].id;
 
 					// delete it
-					return requestp({
-						url: process.env.CI_TENANT_ENDPOINT + "/v2.0/factors/fido2/registrations/" + regId,
-						method: "DELETE",
-						headers: {
-							"Accept": "application/json",
-							"Authorization": "Bearer " + access_token
-						},
-						json: true
-					}).then(() => {
+					return myfetch(
+						process.env.CI_TENANT_ENDPOINT + "/v2.0/factors/fido2/registrations/" + regId,
+						{
+							method: "DELETE",
+							headers: {
+								"Accept": "application/json",
+								"Authorization": "Bearer " + access_token
+							}
+						}
+					).then(() => {
 						logger.logWithTS("Registration deleted: " + regId);
 					});
 				}
@@ -1239,16 +1291,17 @@ function androidSigninRequest(req, rsp) {
 
 		// if we have a username, resolve to check it's legit, and get userId
 		if (username != null) {
-			return requestp({
-				url: process.env.CI_TENANT_ENDPOINT + "/v2.0/Users",
-				method: "GET",
-				qs: { "filter" : 'userName eq "' + username + '"' },
-				headers: {
-					"Accept": "application/scim+json",
-					"Authorization": "Bearer " + access_token
-				},
-				json: true
-			}).then((scimResponse) => {
+			return myfetch(
+				process.env.CI_TENANT_ENDPOINT + "/v2.0/Users?" + new URLSearchParams({ "filter" : 'userName eq "' + username + '"' }),
+				{
+					method: "GET",
+					headers: {
+						"Accept": "application/scim+json",
+						"Authorization": "Bearer " + access_token
+					},
+					returnAsJSON: true
+				}
+			).then((scimResponse) => {
 				if (scimResponse && scimResponse.totalResults == 1 && scimResponse.Resources[0].active) {
 					userId = scimResponse.Resources[0].id;
 				}
@@ -1269,18 +1322,19 @@ function androidSigninRequest(req, rsp) {
 		}
 
 		// call CI
-		var options = {
-			url: process.env.CI_TENANT_ENDPOINT + "/v2.0/factors/fido2/relyingparties/" + rpUuid + "/assertion/options",
-			method: "POST",
-			headers: {
-				"Content-type": "application/json",
-				"Accept": "application/json",
-				"Authorization": "Bearer " + access_token
-			},
-			json: true,
-			body: reqBody
-		};
-		return requestp(options);
+		return myfetch(
+			process.env.CI_TENANT_ENDPOINT + "/v2.0/factors/fido2/relyingparties/" + rpUuid + "/assertion/options",
+			{
+				method: "POST",
+				headers: {
+					"Content-type": "application/json",
+					"Accept": "application/json",
+					"Authorization": "Bearer " + access_token
+				},
+				body: JSON.stringify(reqBody),
+				returnAsJSON: true
+			}
+		);
 	}).then((rspBody) => {
 		// remove these - the android app doesn't understand them
 		delete rspBody["status"];
@@ -1335,30 +1389,32 @@ function androidSigninResponse(req, rsp) {
 				"response": response
 			};
 
-			var options = {
-				url: process.env.CI_TENANT_ENDPOINT + "/v2.0/factors/fido2/relyingparties/" + rpUuid + "/assertion/result",
-				method: "POST",
-				headers: {
-					"Content-type": "application/json",
-					"Accept": "application/json",
-					"Authorization": "Bearer " + access_token
-				},
-				json: true,
-				body: reqBody
-			};
-			return requestp(options);
+			return myfetch(
+				process.env.CI_TENANT_ENDPOINT + "/v2.0/factors/fido2/relyingparties/" + rpUuid + "/assertion/result",
+				{
+					method: "POST",
+					headers: {
+						"Content-type": "application/json",
+						"Accept": "application/json",
+						"Authorization": "Bearer " + access_token
+					},
+					body: JSON.stringify(reqBody),
+					returnAsJSON: true
+				}
+			);
 		}).then((rspBody) => {
 			// worked - resolve userId to username and make sure they are real and still active
-			return requestp({
-				url: process.env.CI_TENANT_ENDPOINT + "/v2.0/Users",
-				method: "GET",
-				qs: { "filter" : 'id eq "' + rspBody.userId + '"' },
-				headers: {
-					"Accept": "application/scim+json",
-					"Authorization": "Bearer " + access_token
-				},
-				json: true
-			});
+			return myfetch(
+				process.env.CI_TENANT_ENDPOINT + "/v2.0/Users?" + new URLSearchParams({ "filter" : 'id eq "' + rspBody.userId + '"' }),
+				{
+					method: "GET",
+					headers: {
+						"Accept": "application/scim+json",
+						"Authorization": "Bearer " + access_token
+					},
+					returnAsJSON: true
+				}
+			);
 		}).then((scimResponse) => {
 			if (scimResponse && scimResponse.totalResults == 1) {
 				if (scimResponse.Resources[0].active) {

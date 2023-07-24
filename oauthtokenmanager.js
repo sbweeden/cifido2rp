@@ -1,7 +1,6 @@
 //
 // OAuthTokenManager - looks after APIs needed to get or refresh access tokens
 //
-const requestp = require('request-promise-native');
 const logger = require('./logging.js');
 const fido2error = require('./fido2error.js');
 
@@ -24,14 +23,17 @@ function getAccessToken(req) {
 		var tokenResponse = null;
 		if (req != null && req.session != null && req.session.tokenResponse != null) {
 			tokenResponse = req.session.tokenResponse;
+			//logger.logWithTS("Using session tokenResponse");
 		}
 		// if we haven't found a userTokenResponse, fallback to the admin token response
 		if (tokenResponse == null) {
 			isSessionTokenResponse = false;
 			tokenResponse = adminTokenResponse;
+			//logger.logWithTS("Using adminTokenResponse tokenResponse");
 		}
 
 		if (tokenResponse != null && tokenResponse.expires_at_ms > (now.getTime() + (2*60*1000))) {
+			//logger.logWithTS("Using existing access_token");
 			resolve(tokenResponse.access_token);
 		} else {
 			var formData = null;
@@ -50,19 +52,25 @@ function getAccessToken(req) {
 					"client_secret": process.env.OAUTH_CLIENT_SECRET
 				};
 			}
-			console.log("oauthtokenmanager about to get new token with formData: " + JSON.stringify(formData));
+			//console.log("oauthtokenmanager about to get new token with formData: " + JSON.stringify(formData));
 
-			var options = {
-				url: process.env.CI_TENANT_ENDPOINT + "/v1.0/endpoint/default/token",
-				method: "POST",
-				headers: {
-					"Accept": "application/json",
-				},
-				form: formData,
-				json: true
-			};
+			let myBody = new URLSearchParams(formData);
 
-			requestp(options).then((tr) => {
+			fetch(
+				process.env.CI_TENANT_ENDPOINT + "/v1.0/endpoint/default/token",
+				{
+					method: "POST",
+					headers: {
+						"Accept": "application/json"
+					},
+					body: myBody
+				}
+				).then((rsp) => {
+					if (!rsp.ok) {
+						throw new Error("Unexpected HTTP response code: " + response.status);
+					}
+					return rsp.json();
+				}).then((tr) => {
 				if (tr && tr.access_token) {
 					// compute this
 					var now = new Date();
