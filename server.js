@@ -200,6 +200,34 @@ app.post('/auth/signinResponse', (req, rsp) => {
  * End section of URLs used by the android app
  */
 
+/*
+ * Start section of URLs used by the FIDO2App
+ */
+app.get('/ivcreds', (req, rsp) => {
+	identityServices.fido2appIVCredsResponse(req, rsp);
+});
+
+app.post(process.env.FIDO2APP_URLPREFIX +'/attestation/options', (req, rsp) => {
+	identityServices.fido2appAttestationOptions(req, rsp);
+});
+
+app.post(process.env.FIDO2APP_URLPREFIX +'/attestation/result', (req, rsp) => {
+	identityServices.fido2appAttestationResult(req, rsp);
+});
+
+app.post(process.env.FIDO2APP_URLPREFIX +'/assertion/options', (req, rsp) => {
+	identityServices.fido2appAssertionOptions(req, rsp);
+});
+
+app.post(process.env.FIDO2APP_URLPREFIX +'/assertion/result', (req, rsp) => {
+	identityServices.fido2appAssertionResult(req, rsp);
+});
+
+/*
+ * End section of URLs used by the FIDO2App
+ */
+
+
 // listen for requests
 if (process.env.LOCAL_SSL_SERVER == "true") {
 	https.createServer({

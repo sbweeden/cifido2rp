@@ -270,7 +270,7 @@
 			var jsonAttributes = [ "attributes", "references" ]; 
 			
 			// dump details of this registration into the msgdiv
-			var details = "Registration Details<br />";
+			var details = "<h2>Registration Details</h2><br />";
 			details += "<table border=\"1\">";
 			details += "<tr><th>Attribute</th><th>Value</th></tr>";
 			var keys = Object.keys(reg);
@@ -310,6 +310,18 @@
 				}
 			}
 			details += "</table>";
+
+			// add pretty display of any transactions
+			if (reg.attributes != null && reg.attributes.transactions != null && reg.attributes.transactions.length > 0) {
+				details += "<h2>Transactions</h2>";
+				details += "<table border=\"1\">";
+				details += "<tr><th>Timestamp</th><th>Transaction Text</th></tr>";
+				reg.attributes.transactions.forEach((t) => {
+					details += "<tr><td>"+htmlEncode(t.timestamp)+"</td><td>"+htmlEncode(t.txt)+"</td></tr>";
+				});
+				details += "</table>";
+			}
+
 			updateMsgRaw(details);
 		}
 

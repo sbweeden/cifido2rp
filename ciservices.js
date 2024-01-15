@@ -2,10 +2,16 @@
 // ciservices - performs user and FIDO2 operations against IBM Cloud Identity
 //
 const KJUR = require('jsrsasign');
-const cbor = require('cbor');
 const logger = require('./logging.js');
 const tm = require('./oauthtokenmanager.js');
 const fido2error = require('./fido2error.js');
+const fidoutils = require('./fidoutils.js');
+const tokenIntrospection = require('token-introspection')({
+	endpoint: process.env.CI_TENANT_ENDPOINT + '/v1.0/endpoint/default/introspect',
+	client_id: process.env.OAUTH_CLIENT_ID,
+	client_secret: process.env.OAUTH_CLIENT_SECRET
+});
+const txnprocessing = require('./txnprocessing.js');
 
 //
 // Caching logic to reduce number of calls to CI
@@ -324,6 +330,10 @@ function registrationDetails(req, rsp) {
 				logger.logWithTS("registrationDetails." + regId + " received: " + JSON.stringify(reg));
 				// check it is owned by the currenty authenticated user
 				if (reg.userId == req.session.userSCIMId) {
+					// if there are any transactions associated with this registration, add them in for display
+					let txns = txnprocessing.getTransactionsForCredentialID(reg.attributes.credentialId);
+					reg.attributes.transactions = txns;
+
 					rsp.json(reg);
 				} else {
 					throw new fido2error.fido2Error("Not owner of registration");
@@ -504,6 +514,15 @@ function getUserResponse(req) {
 		return coerceCIRegistrationsToClientFormat(registrationsResponse);
 	}).then((registrationsResponse) => {
 		result.credentials = registrationsResponse.fido2;
+
+		// for each credential add any transactions if present
+		if (result.credentials != null) {
+			for (let i = 0; i < result.credentials.length; i++) {
+				let txns = txnprocessing.getTransactionsForCredentialID(result.credentials[i].attributes.credentialId);
+				result.credentials[i].attributes.transactions = txns;		
+			}
+		}
+
 		return result;
 	});
 }
@@ -532,198 +551,7 @@ function sendUserResponse(req, rsp) {
 * Start of section dedicated to APIs used by the android app
 */
 
-/**
- * Extracts the bytes from an array beginning at index start, and continuing until 
- * index end-1 or the end of the array is reached. Pass -1 for end if you want to 
- * parse till the end of the array.
- */
-function bytesFromArray(o, start, end) {
-	// o may be a normal array of bytes, or it could be a JSON encoded Uint8Array
-	var len = o.length;
-	if (len == null) {
-		len = Object.keys(o).length;
-	}
-	
-	var result = [];
-	for (var i = start; (end == -1 || i < end) && (i < len); i++) {
-		result.push(o[i]);
-	}
-	return result;
-}
-
-/*
-* returns true if o's keys are only "0", "1", ... "n"
-*/
-function integerKeys(o) {
-	var result = false;
-	if (o != null) {
-		var oKeys = Object.keys(o);
-		var intArray = [...Array(oKeys.length).keys()];
-		var result = true;
-		for (var i = 0; i < intArray.length && result; i++) {
-			if (oKeys[i] != ''+intArray[i]) {
-				result = false;
-			}
-		}
-	}
-	return result;
-}
-
-/*
-* Recursively inspect every element of o and if it is an object which is not already 
-* an Array and who's keys are only the numbers from 0...x then assume that object is an
-* ArrayBuffer and convert to BA.
-*/
-function convertArrayBuffersToByteArrays(o) {
-	if (o != null) {
-		Object.keys(o).forEach((k)=> {
-			if (typeof o[k] == "object") {
-				if (!Array.isArray(o[k]) && integerKeys(o[k])) {
-					o[k] = bytesFromArray(o[k], 0, -1);
-				} else {
-					convertArrayBuffersToByteArrays(o[k]);
-				}
-			}
-		});
-	}
-	return o;
-}
-
-/**
-* Converts a JSON COSE Key to a KJUR public key variable
-*/
-function coseKeyToPublicKey(k) {
-	var result = null;
-
-	if (k != null) {
-		// see https://tools.ietf.org/html/rfc8152
-		// and https://www.iana.org/assignments/cose/cose.xhtml
-		var kty = k["1"];
-		var alg = k["3"];
-
-		if (kty == 1) {
-			// EdDSA key type
-			validEDAlgs = [ -8 ];
-			if (validEDAlgs.indexOf(alg) >= 0) {
-				var crvMap = {
-						"6" : "Ed25519",
-						"7" : "Ed448"
-					};
-					var crv = crvMap['' + k["-1"]];
-					if (crv != null) {
-						console.log("No support for EdDSA keys");
-					} else {
-						console.log("Invalid crv: " + k["-1"] + " for ED key type");
-					}
-
-			} else {
-				console.log("Invalid alg: " + alg + " for ED key type");
-			}
-		} else if (kty == 2) {
-			// EC key type
-			validECAlgs = [ -7, -35, -36 ];
-
-			if (validECAlgs.indexOf(alg) >= 0) {
-				var crvMap = {
-					"1" : "P-256",
-					"2" : "P-384",
-					"3" : "P-521" // this is not a typo. It is 521
-				};
-				var crv = crvMap['' + k["-1"]];
-				if (crv != null) {
-					// ECDSA
-					var xCoordinate = bytesFromArray(k["-2"], 0, -1);
-					var yCoordinate = bytesFromArray(k["-3"], 0, -1);
-
-					if (xCoordinate != null && xCoordinate.length > 0
-							&& yCoordinate != null && yCoordinate.length > 0) {
-						result = KJUR.KEYUTIL.getKey({
-							"kty" : "EC",
-							"crv" : crv,
-							"x" : KJUR.hextob64(KJUR.BAtohex(xCoordinate)),
-							"y" : KJUR.hextob64(KJUR.BAtohex(yCoordinate))
-						});
-					} else {
-						console.log("Invalid x or y co-ordinates for EC key type");
-					}
-				} else {
-					console.log("Invalid crv: " + k["-1"] + " for EC key type");
-				}
-			} else {
-				console.log("Invalid alg: " + alg + " for EC key type");
-			}
-		} else if (kty == 3) {
-			// RSA key type
-			validRSAAlgs = [ -37, -38, -39, -257, -258, -259, -65535 ];
-			if (validRSAAlgs.indexOf(alg) >= 0) {
-				var n = bytesFromArray(k["-1"], 0, -1);
-				var e = bytesFromArray(k["-2"], 0, -1);
-				if (n != null && n.length > 0 && e != null && e.length > 0) {
-					result = KJUR.KEYUTIL.getKey({
-						"kty" : "RSA",
-						"n" : KJUR.hextob64(KJUR.BAtohex(n)),
-						"e" : KJUR.hextob64(KJUR.BAtohex(e))
-					});
-				} else {
-					console.log("Invalid n or e values for RSA key type");
-				}
-			} else {
-				console.log("Invalid alg: " + alg + " for RSA key type");
-			}
-		} else {
-			console.log("Unsupported key type: " + kty);
-		}
-	}
-	return result;
-}
-
-/**
-* Converts a KJUR public key object to a PEM string
-*/
-function publicKeyToPEM(pk) {
-	var result = "";
-	if (pk instanceof KJUR.RSAKey) {
-		result = KJUR.KEYUTIL.getPEM(pk);
-	} else if (pk instanceof KJUR.crypto.ECDSA) {
-		result = certToPEM(KJUR.b64toBA(KJUR.hextob64(pk.pubKeyHex)));
-	}
-	return result;			
-}
-
-/**
- * Converts the bytes of an asn1-encoded X509 ceritificate or raw public key
- * into a PEM-encoded cert string
- */
-function certToPEM(cert) {
-	var keyType = "CERTIFICATE";
-	asn1key = cert;
-
-	if (cert != null && cert.length == 65 && cert[0] == 0x04) {
-		// this is a raw public key - prefix with ASN1 metadata
-		// SEQUENCE {
-		// SEQUENCE {
-		// OBJECTIDENTIFIER 1.2.840.10045.2.1 (ecPublicKey)
-		// OBJECTIDENTIFIER 1.2.840.10045.3.1.7 (P-256)
-		// }
-		// BITSTRING <raw public key>
-		// }
-		// We just need to prefix it with constant 26 bytes of metadata
-		asn1key = KJUR.b64toBA(KJUR.hextob64("3059301306072a8648ce3d020106082a8648ce3d030107034200"));
-		Array.prototype.push.apply(asn1key, cert);
-		keyType = "PUBLIC KEY";
-	}
-	var result = "-----BEGIN " + keyType + "-----\n";
-	var b64cert = KJUR.hextob64(KJUR.BAtohex(asn1key));
-	for (; b64cert.length > 64; b64cert = b64cert.slice(64)) {
-		result += b64cert.slice(0, 64) + "\n";
-	}
-	if (b64cert.length > 0) {
-		result += b64cert + "\n";
-	}
-	result += "-----END " + keyType + "-----\n";
-	return result;
-}
-
+// Debugging utility
 function logRequest(api, req) {
 	console.log("API: " + api);
 	console.log("req keys: " + Object.keys(req));
@@ -822,9 +650,9 @@ function getUsernameAndCredentialsResponse(req, username, requireSignedInCookie)
 						if (aaguidStr == null) {
 							aaguidStr = "00000000-0000-0000-0000-000000000000";
 						}
-						var coseKey = convertArrayBuffersToByteArrays(cbor.decodeFirstSync(KJUR.b64tohex(reg.attributes.credentialPublicKey)));
-						var pk = coseKeyToPublicKey(coseKey);
-						var publicKeyPEM = publicKeyToPEM(pk);
+						var coseKey = fidoutils.publicKeyStringToCOSEKey(reg.attributes.credentialPublicKey);
+						var pk = fidoutils.coseKeyToPublicKey(coseKey);
+						var publicKeyPEM = fidoutils.publicKeyToPEM(pk);
 
 						result.credentials.push({
 							"credId": reg.attributes.credentialId,
@@ -1450,6 +1278,231 @@ function androidSigninResponse(req, rsp) {
 }
 
 
+function validateAccessToken(req) {
+	let bearerToken = req.get('Authorization').match(/[Bb][Ee][Aa][Rr][Ee][Rr] (.*)/)[1];
+	let introspectResponse = null;
+	return tokenIntrospection(bearerToken)
+	.then((ir) => {
+		introspectResponse = ir;
+		console.log("introspectResponse: " + JSON.stringify(introspectResponse));
+		var url = process.env.CI_TENANT_ENDPOINT + "/v1.0/endpoint/default/userinfo";
+		var options = {
+			method: "POST",
+			headers: {
+				"Accept": "application/json",
+				"Authorization": "Bearer " + bearerToken
+			},
+			returnAsJSON: true
+		};
+
+		return myfetch(
+			url,
+			options
+		);
+	}).then((uir) => {
+		console.log("userinfoResponse: " + JSON.stringify(uir));
+		let result = {
+			bearerToken: bearerToken,
+			introspect: introspectResponse,
+			userinfo: uir
+		};
+		return result;
+	});
+}
+
+/**
+* Start of section dedicated to APIs used by the FIDO2App
+*/
+
+function fido2appIVCredsResponse(req, rsp) {
+	validateAccessToken(req)
+	.then((validationResult) => {
+		console.log("validationResult: " + JSON.stringify(validationResult));
+		rsp.json({
+			"AZN_CRED_PRINCIPAL_NAME": validationResult.userinfo.sub,
+			"email": validationResult.userinfo.email,
+			"name": validationResult.userinfo.displayName /*validationResult.userinfo.preferred_username */
+		});	
+	}).catch((e) => {
+		console.log(e);
+		rsp.json({"AZN_CRED_PRINCIPAL_NAME": "unauthenticated"});
+	});
+}
+
+function fido2appAttestationOptions(req, rsp) {
+	let userId = null;
+	let user_access_token = null;
+	let bodyToSend = req.body;
+	validateAccessToken(req)
+	.then((validationResult) => {
+		userId = validationResult.userinfo.sub;
+		user_access_token = validationResult.bearerToken;
+		return rpIdTorpUuid(process.env.RPID);
+	}).then((rpUuid) => {
+		// the CI body is slightly different from the FIDO server spec. 
+		// instead of username we need to provide userId which is the CI IUI for the user.
+		if (bodyToSend.username != null) {
+			delete bodyToSend.username;
+			bodyToSend.userId = userId;
+		}
+
+		let options = {
+			method: "POST",
+			headers: {
+				"Content-type": "application/json",
+				"Accept": "application/json",
+				"Authorization": "Bearer " + user_access_token
+			},
+			returnAsJSON: true,
+			body: JSON.stringify(bodyToSend)
+		};
+		logger.logWithTS("fido2appAttestationOptions.options: " + JSON.stringify(options));
+		return myfetch(
+			process.env.CI_TENANT_ENDPOINT + "/v2.0/factors/fido2/relyingparties/" + rpUuid + "/attestation/options",
+			options
+		);
+	}).then((attestationOptionsResponse) => {
+		// worked - add server spec status and error message fields
+		let rspBody = attestationOptionsResponse;
+		rspBody.status = "ok";
+		rspBody.errorMessage = "";
+		logger.logWithTS("fido2appAttestationOptions.success: " + JSON.stringify(rspBody));
+		rsp.json(rspBody);
+	}).catch((e)  => {
+		handleErrorResponse("fido2appAttestationOptions", rsp, e, "Unable to proxy FIDO2 request");
+	});
+}
+
+function fido2appAttestationResult(req, rsp) {
+	let user_access_token = null;
+	let bodyToSend = req.body;
+
+	// when performing registrations, I want the registration 
+	// enabled immediately so insert this additional option
+	bodyToSend.enabled = true;
+
+	validateAccessToken(req)
+	.then((validationResult) => {
+		user_access_token = validationResult.bearerToken;
+		return rpIdTorpUuid(process.env.RPID);
+	}).then((rpUuid) => {
+		let options = {
+			method: "POST",
+			headers: {
+				"Content-type": "application/json",
+				"Accept": "application/json",
+				"Authorization": "Bearer " + user_access_token
+			},
+			returnAsJSON: true,
+			body: JSON.stringify(bodyToSend)
+		};
+		logger.logWithTS("fido2appAttestationResult.options: " + JSON.stringify(options));
+		return myfetch(
+			process.env.CI_TENANT_ENDPOINT + "/v2.0/factors/fido2/relyingparties/" + rpUuid + "/attestation/result",
+			options
+		);
+	}).then((attestationResultResponse) => {
+		// worked - add server spec status and error message fields
+		let rspBody = attestationResultResponse;
+		rspBody.status = "ok";
+		rspBody.errorMessage = "";
+		logger.logWithTS("fido2appAttestationResult.success: " + JSON.stringify(rspBody));
+		rsp.json(rspBody);
+	}).catch((e)  => {
+		handleErrorResponse("fido2appAttestationResult", rsp, e, "Unable to proxy FIDO2 request");
+	});
+}
+
+function fido2appAssertionOptions(req, rsp) {
+	let userId = null;
+	let user_access_token = null;
+	let bodyToSend = req.body;
+	validateAccessToken(req)
+	.then((validationResult) => {
+		userId = validationResult.userinfo.sub;
+		user_access_token = validationResult.bearerToken;
+		return rpIdTorpUuid(process.env.RPID);
+	}).then((rpUuid) => {
+		// the CI body is slightly different from the FIDO server spec. 
+		// instead of username we need to provide userId which is the CI IUI for the user.
+		if (bodyToSend.username != null) {
+			delete bodyToSend.username;
+			bodyToSend.userId = userId;
+		}
+
+		let options = {
+			method: "POST",
+			headers: {
+				"Content-type": "application/json",
+				"Accept": "application/json",
+				"Authorization": "Bearer " + user_access_token
+			},
+			returnAsJSON: true,
+			body: JSON.stringify(bodyToSend)
+		};
+		logger.logWithTS("fido2appAssertionOptions.options: " + JSON.stringify(options));
+		return myfetch(
+			process.env.CI_TENANT_ENDPOINT + "/v2.0/factors/fido2/relyingparties/" + rpUuid + "/assertion/options",
+			options
+		);
+	}).then((assertionOptionsResponse) => {
+		// worked - add server spec status and error message fields
+		let rspBody = assertionOptionsResponse;
+		rspBody.status = "ok";
+		rspBody.errorMessage = "";
+		logger.logWithTS("fido2appAssertionOptions.success: " + JSON.stringify(rspBody));
+		rsp.json(rspBody);
+	}).catch((e)  => {
+		handleErrorResponse("fido2appAssertionOptions", rsp, e, "Unable to proxy FIDO2 request");
+	});
+}
+
+function fido2appAssertionResult(req, rsp) {
+	let user_access_token = null;
+	let bodyToSend = req.body;
+	validateAccessToken(req)
+	.then((validationResult) => {
+		user_access_token = validationResult.bearerToken;
+		return rpIdTorpUuid(process.env.RPID);
+	}).then((rpUuid) => {
+		let options = {
+			method: "POST",
+			headers: {
+				"Content-type": "application/json",
+				"Accept": "application/json",
+				"Authorization": "Bearer " + user_access_token
+			},
+			returnAsJSON: true,
+			body: JSON.stringify(bodyToSend)
+		};
+		logger.logWithTS("fido2appAssertionResult.options: " + JSON.stringify(options));
+		return myfetch(
+			process.env.CI_TENANT_ENDPOINT + "/v2.0/factors/fido2/relyingparties/" + rpUuid + "/assertion/result",
+			options
+		);
+	}).then((assertionResultResponse) => {
+		// worked - add server spec status and error message fields
+		let rspBody = assertionResultResponse;
+		rspBody.status = "ok";
+		rspBody.errorMessage = "";
+		logger.logWithTS("fido2appAssertionResult.success: " + JSON.stringify(rspBody));
+		return rspBody;
+	}).then((rspBody) => {
+		// just before we write the response unpack the authenticatorData that was used
+		// in this request, and see if there are any txAuthSimple extensions in it
+		let authenticatorDataStr = bodyToSend.response.authenticatorData;
+		let unpackedAuthData = fidoutils.unpackAuthData(KJUR.b64toBA(KJUR.b64utob64(authenticatorDataStr)));
+		console.log("unpackedAuthData: " + JSON.stringify(unpackedAuthData));		
+		if (unpackedAuthData.status && unpackedAuthData.extensions != null && unpackedAuthData.extensions.txAuthSimple != null) {
+			txnprocessing.storeTransactionForCredential(bodyToSend.id, unpackedAuthData.extensions.txAuthSimple, rspBody.attempted);
+		}
+		rsp.json(rspBody);
+	}).catch((e)  => {
+		handleErrorResponse("fido2appAssertionResult", rsp, e, "Unable to proxy FIDO2 request");
+	});
+}
+
+
 module.exports = { 
 	validateUsernamePassword: validateUsernamePassword,
 	sendUserResponse: sendUserResponse, 
@@ -1465,5 +1518,10 @@ module.exports = {
 	androidRegisterResponse: androidRegisterResponse,
 	androidRemoveKey: androidRemoveKey,
 	androidSigninRequest: androidSigninRequest,
-	androidSigninResponse: androidSigninResponse
+	androidSigninResponse: androidSigninResponse,
+	fido2appIVCredsResponse: fido2appIVCredsResponse,
+	fido2appAttestationOptions: fido2appAttestationOptions,
+	fido2appAttestationResult: fido2appAttestationResult,
+	fido2appAssertionOptions: fido2appAssertionOptions,
+	fido2appAssertionResult: fido2appAssertionResult
 };
